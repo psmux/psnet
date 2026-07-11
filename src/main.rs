@@ -17,6 +17,31 @@ use ratatui::Terminal;
 use app::App;
 
 fn main() -> io::Result<()> {
+    // Handle CLI flags before touching the terminal
+    let mut args = std::env::args().skip(1);
+    if let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-v" | "-V" | "--version" => {
+                println!("psnet {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "-h" | "--help" => {
+                println!("psnet {} - real-time TUI network monitor for Windows", env!("CARGO_PKG_VERSION"));
+                println!();
+                println!("Usage: psnet [OPTIONS]");
+                println!();
+                println!("Options:");
+                println!("  -v, -V, --version  Print version and exit");
+                println!("  -h, --help         Print this help and exit");
+                return Ok(());
+            }
+            other => {
+                eprintln!("psnet: unknown option '{}'. Try --help.", other);
+                std::process::exit(2);
+            }
+        }
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
