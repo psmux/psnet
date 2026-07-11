@@ -78,7 +78,12 @@ extern "system" {
         pRecordList: *mut DNS_RECORD,
         FreeType: i32,
     );
+
+    fn DnsFree(pData: *mut std::ffi::c_void, FreeType: i32);
 }
+
+/// DNS_FREE_TYPE::DnsFreeFlat — frees a single flat allocation.
+const DNS_FREE_FLAT: i32 = 0;
 
 /// Read the Windows DNS resolver cache via DnsGetCacheDataTable API.
 pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
@@ -91,8 +96,13 @@ pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
             return reverse_map;
         }
 
+        // Every node of the table (and each node's name string) is allocated
+        // by dnsapi and must be released with DnsFree, or the whole table
+        // leaks on every call. This runs every couple of seconds, so the
+        // missing frees compounded to gigabytes over long sessions (issue #5).
         let mut entry = head;
         while !entry.is_null() {
+            let next = (*entry).pNext;
             let name_ptr = (*entry).pszName;
             let wtype = (*entry).wType;
 
@@ -138,7 +148,11 @@ pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
                 }
             }
 
-            entry = (*entry).pNext;
+            if !name_ptr.is_null() {
+                DnsFree(name_ptr as *mut std::ffi::c_void, DNS_FREE_FLAT);
+            }
+            DnsFree(entry as *mut std::ffi::c_void, DNS_FREE_FLAT);
+            entry = next;
         }
     }
 

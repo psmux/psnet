@@ -162,11 +162,18 @@ pub struct App {
     // Background task results — avoid blocking UI thread
     bg_dns_servers: Arc<Mutex<Option<Vec<IpAddr>>>>,
     bg_dns_ipconfig: Arc<Mutex<Option<Vec<(IpAddr, String)>>>>,
+
+    /// Subsystems disabled via PSNET_DISABLE (comma separated), for leak
+    /// bisection and low-footprint operation.
+    disabled: std::collections::HashSet<String>,
 }
 
 impl App {
     pub fn new(networks: &Networks) -> Self {
         let (recv, sent, iface) = get_network_bytes(networks);
+        let disabled: std::collections::HashSet<String> = std::env::var("PSNET_DISABLE")
+            .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
+            .unwrap_or_default();
         Self {
             speed_history: SpeedHistory::new(60),
             current_down_speed: 0.0,
@@ -200,7 +207,9 @@ impl App {
 
             sniffer: {
                 let mut s = PacketSniffer::new(5000);
-                s.start();
+                if !disabled.contains("sniffer") {
+                    s.start();
+                }
                 s
             },
 
@@ -258,6 +267,7 @@ impl App {
 
             bg_dns_servers: Arc::new(Mutex::new(None)),
             bg_dns_ipconfig: Arc::new(Mutex::new(None)),
+            disabled,
             status_message: None,
         }
     }
@@ -349,7 +359,9 @@ impl App {
         self.connections = fetch_connections(&mut self.pid_cache);
 
         // Resolve DNS for remote addresses
-        self.resolve_dns();
+        if !self.disabled.contains("dns") {
+            self.resolve_dns();
+        }
 
         self.sort_connections();
 
@@ -517,12 +529,14 @@ impl App {
         // Network scanner tick — full-speed when on Devices tab, slow otherwise
         // (still needed for alert engine: new device, device left, ARP anomaly)
         let on_devices_tab = self.bottom_tab == BottomTab::Devices;
-        if on_devices_tab || self.tick_count % 30 == 0 {
+        if (on_devices_tab || self.tick_count % 30 == 0) && !self.disabled.contains("netscan") {
             self.network_scanner.tick();
         }
 
         // Servers scanner tick — always tick to collect results, scans internally throttled
-        self.servers_scanner.tick();
+        if !self.disabled.contains("servers") {
+            self.servers_scanner.tick();
+        }
 
         // Networks scanner tick — only when on Networks tab
         if self.bottom_tab == BottomTab::Networks {
@@ -533,13 +547,17 @@ impl App {
         }
 
         // System monitor tick (hosts file, proxy, WiFi, app hash changes)
-        let sys_events = self.system_monitor.tick();
-        if !sys_events.is_empty() {
-            self.alert_engine.check_system_events(&sys_events);
+        if !self.disabled.contains("sysmon") {
+            let sys_events = self.system_monitor.tick();
+            if !sys_events.is_empty() {
+                self.alert_engine.check_system_events(&sys_events);
+            }
         }
 
         // Firewall manager tick (periodic rule refresh)
-        self.firewall_manager.tick();
+        if !self.disabled.contains("firewall") {
+            self.firewall_manager.tick();
+        }
 
         // Ask-to-connect mode: check new processes
         if self.firewall_manager.mode == FirewallMode::AskToConnect {
@@ -576,7 +594,45 @@ impl App {
         self.prev_traffic_log_len = current_log_len;
         self.alert_engine.idle_tracker.tick(new_conn_count, tick_delta_down, tick_delta_up);
 
+        self.dump_debug_stats();
+
         self.tick_count = self.tick_count.wrapping_add(1);
+    }
+
+    /// Opt-in leak diagnostics: PSNET_DEBUG_STATS=<file> appends collection
+    /// sizes every 20 ticks so unbounded growth can be pinpointed in the field.
+    fn dump_debug_stats(&mut self) {
+        if self.tick_count % 20 != 0 {
+            return;
+        }
+        let Ok(path) = std::env::var("PSNET_DEBUG_STATS") else { return };
+        let (sniff_len, sniff_bytes) = self.sniffer.snippets.lock()
+            .map(|l| (l.len(), l.iter().map(|p| p.raw_payload.len() + p.snippet.len()).sum::<usize>()))
+            .unwrap_or((0, 0));
+        let per_app_today = self.usage_tracker.store.daily_records.last()
+            .map(|r| r.per_app.len()).unwrap_or(0);
+        let line = format!(
+            "tick={} conns={} dns={} tlog={} sniff={} sniff_b={} apps={} alerts={} devices={} servers={} hist={} usage_days={} usage_apps={} fading={} pidc={}\n",
+            self.tick_count,
+            self.connections.len(),
+            self.dns_cache.len(),
+            self.traffic_tracker.log.len(),
+            sniff_len,
+            sniff_bytes,
+            self.bandwidth_tracker.apps.len(),
+            self.alert_engine.alerts.len(),
+            self.network_scanner.devices.len(),
+            self.servers_scanner.servers.len(),
+            self.traffic_history.samples.len(),
+            self.usage_tracker.store.daily_records.len(),
+            per_app_today,
+            self.map_fading_dots.len(),
+            self.pid_cache.len(),
+        );
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
     }
 
     // ─── DNS resolution ───────────────────────────────────────────────
