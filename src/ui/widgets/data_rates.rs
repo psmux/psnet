@@ -69,8 +69,8 @@ pub fn draw_data_rates(f: &mut Frame, area: Rect, app: &App) {
         let total = down + up;
 
         // Truncate name
-        let display_name: String = if name.len() > name_budget {
-            format!("{}…", &name[..name_budget.saturating_sub(1)])
+        let display_name: String = if name.chars().count() > name_budget {
+            format!("{}…", name.chars().take(name_budget.saturating_sub(1)).collect::<String>())
         } else {
             format!("{:<width$}", name, width = name_budget)
         };

@@ -509,7 +509,7 @@ fn build_details(name: &str, exe: &str, cmd: &str, probe: Option<&ProbeResult>) 
     }
     if !cmd.is_empty() && cmd != name && cmd != exe {
         // Truncate long cmdlines
-        let display = if cmd.len() > 120 { &cmd[..120] } else { cmd };
+        let display: String = if cmd.chars().count() > 120 { cmd.chars().take(120).collect() } else { cmd.to_string() };
         parts.push(format!("Cmd: {}", display));
     }
     if let Some(p) = probe {

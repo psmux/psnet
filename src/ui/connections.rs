@@ -71,8 +71,8 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
                     proc_name.clone()
                 };
                 // Truncate to fit the 20-char Process column (2 chars used by prefix)
-                let base = if base.len() > 18 {
-                    format!("{}…", &base[..17])
+                let base = if base.chars().count() > 18 {
+                    format!("{}…", base.chars().take(17).collect::<String>())
                 } else {
                     base
                 };
@@ -88,7 +88,7 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
             let (remote_display, remote_color) = match (&conn.dns_hostname, conn.remote_addr) {
                 (Some(dns), _) if dns != "localhost" => {
                     // Cap at 44 chars to prevent rows overflowing in embedded terminals
-                    let host = if dns.len() > 44 { format!("{}…", &dns[..43]) } else { dns.clone() };
+                    let host = if dns.chars().count() > 44 { format!("{}…", dns.chars().take(43).collect::<String>()) } else { dns.clone() };
                     (format!("\u{2192} {}", host), Color::Rgb(100, 220, 255))
                 }
                 (Some(_), Some(ip)) if ip.is_loopback() => {

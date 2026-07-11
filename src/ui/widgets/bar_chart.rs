@@ -21,8 +21,10 @@ pub fn draw_bar_chart(f: &mut Frame, area: Rect, title: &str, entries: &[BarEntr
     let bar_width = inner_width.saturating_sub(label_width + value_width + 3);
 
     let lines: Vec<Line> = entries.iter().take(inner_height).map(|entry| {
-        let name = if entry.label.len() > label_width {
-            format!("{}…", &entry.label[..label_width - 1])
+        let char_count = entry.label.chars().count();
+        let name = if char_count > label_width {
+            let truncated: String = entry.label.chars().take(label_width - 1).collect();
+            format!("{}…", truncated)
         } else {
             format!("{:width$}", entry.label, width = label_width)
         };

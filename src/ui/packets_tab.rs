@@ -290,9 +290,9 @@ fn format_address(
 
     let label = if let Some(host) = hostname {
         // Truncate long hostnames
-        if host.len() > max_w.saturating_sub(8) {
+        if host.chars().count() > max_w.saturating_sub(8) {
             let keep = max_w.saturating_sub(11);
-            format!("{}...:{}", &host[..keep.min(host.len())], port)
+            format!("{}...:{}", host.chars().take(keep).collect::<String>(), port)
         } else if !svc.is_empty() {
             format!("{}:{} ({})", host, port, svc)
         } else {
@@ -304,8 +304,8 @@ fn format_address(
         format!("{}:{}", ip, port)
     };
 
-    if label.len() > max_w {
-        format!("{}...", &label[..max_w.saturating_sub(3)])
+    if label.chars().count() > max_w {
+        format!("{}...", label.chars().take(max_w.saturating_sub(3)).collect::<String>())
     } else {
         label
     }

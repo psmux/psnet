@@ -475,8 +475,8 @@ fn draw_server_detail(f: &mut Frame, area: Rect, detail: &DetailKind) {
     lines.push(row("Process Name", process_name.clone(),        Color::Rgb(130, 200, 140)));
     lines.push(row("Executable",   exe_path.clone(),            Color::Rgb(170, 185, 210)));
 
-    let cmd_display = if cmdline.len() > 100 {
-        format!("{}...", &cmdline[..100])
+    let cmd_display = if cmdline.chars().count() > 100 {
+        format!("{}...", cmdline.chars().take(100).collect::<String>())
     } else {
         cmdline.clone()
     };
@@ -499,8 +499,8 @@ fn draw_server_detail(f: &mut Frame, area: Rect, detail: &DetailKind) {
     }
 
     if !banner.is_empty() {
-        let banner_display = if banner.len() > 80 {
-            format!("{}...", &banner[..80])
+        let banner_display = if banner.chars().count() > 80 {
+            format!("{}...", banner.chars().take(80).collect::<String>())
         } else {
             banner.clone()
         };
