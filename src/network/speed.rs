@@ -15,8 +15,11 @@ pub fn get_network_bytes(networks: &Networks) -> (u64, u64, String) {
 /// On Windows, lightweight filter drivers (e.g. "Wi-Fi-Native WiFi Filter
 /// Driver-0000", "Ethernet-QoS Packet Scheduler-0000") appear as separate
 /// interfaces whose counters mirror the underlying physical adapter. Summing
-/// them double counts every byte. A row is a shadow if its name extends
-/// another interface's name ("<base>-...") and its counters match that base.
+/// them double counts every byte. Detection is purely structural, by the
+/// NDIS naming convention "<base adapter>-<filter name>-NNNN": comparing
+/// counters instead is racy, because the two rows are sampled at slightly
+/// different instants, and a single missed skip injects the adapter's whole
+/// lifetime counter into one tick's delta.
 pub fn aggregate_interface_bytes(ifaces: &[(String, u64, u64)]) -> (u64, u64, String) {
     let mut total_recv: u64 = 0;
     let mut total_sent: u64 = 0;
@@ -24,13 +27,12 @@ pub fn aggregate_interface_bytes(ifaces: &[(String, u64, u64)]) -> (u64, u64, St
     let mut best_traffic: u64 = 0;
 
     for (name, r, s) in ifaces {
-        let is_shadow = ifaces.iter().any(|(base, br, bs)| {
-            base != name
-                && name.starts_with(base.as_str())
-                && name[base.len()..].starts_with('-')
-                && br == r
-                && bs == s
-        });
+        let is_shadow = has_filter_instance_suffix(name)
+            && ifaces.iter().any(|(base, _, _)| {
+                base != name
+                    && name.starts_with(base.as_str())
+                    && name[base.len()..].starts_with('-')
+            });
         if is_shadow {
             continue;
         }
@@ -42,4 +44,13 @@ pub fn aggregate_interface_bytes(ifaces: &[(String, u64, u64)]) -> (u64, u64, St
         }
     }
     (total_recv, total_sent, iface_name)
+}
+
+/// True if the name ends in "-NNNN" (four or more digits), the instance
+/// suffix NDIS appends to filter driver rows.
+fn has_filter_instance_suffix(name: &str) -> bool {
+    match name.rsplit_once('-') {
+        Some((_, tail)) => tail.len() >= 4 && tail.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
 }

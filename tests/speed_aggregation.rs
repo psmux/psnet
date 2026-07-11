@@ -36,13 +36,42 @@ fn independent_adapters_all_counted() {
     assert_eq!(iface, "Ethernet");
 }
 
-/// A filter style name whose counters differ from the base adapter is a real
-/// interface and must still be counted (strict equality guards false skips).
+/// A short numeric suffix is not the NDIS "-NNNN" filter instance pattern,
+/// so an adapter named like this must still be counted.
 #[test]
-fn suffixed_name_with_different_counters_still_counted() {
+fn short_numeric_suffix_still_counted() {
     let ifaces = vec![
         ("Ethernet".to_string(), 1_000u64, 2_000u64),
         ("Ethernet-2".to_string(), 700, 800),
+    ];
+    let (recv, sent, _) = aggregate_interface_bytes(&ifaces);
+    assert_eq!(recv, 1_700);
+    assert_eq!(sent, 2_800);
+}
+
+/// Shadow rows are sampled at a slightly different instant than the base
+/// adapter, so their counters can drift a few bytes apart within one refresh.
+/// They must STILL be skipped: a single missed skip injects the adapter's
+/// whole lifetime counter into one tick's delta (seen live as an 11 GB spike).
+#[test]
+fn shadow_row_with_drifted_counters_still_skipped() {
+    let ifaces = vec![
+        ("Wi-Fi".to_string(), 12_165_914_220u64, 14_636_879_690u64),
+        ("Wi-Fi-Native WiFi Filter Driver-0000".to_string(), 12_165_915_733, 14_636_880_101),
+    ];
+    let (recv, sent, iface) = aggregate_interface_bytes(&ifaces);
+    assert_eq!(recv, 12_165_914_220);
+    assert_eq!(sent, 14_636_879_690);
+    assert_eq!(iface, "Wi-Fi");
+}
+
+/// A filter suffix row only counts as a shadow when a matching base adapter
+/// actually exists in the table.
+#[test]
+fn suffix_without_matching_base_still_counted() {
+    let ifaces = vec![
+        ("Ethernet".to_string(), 1_000u64, 2_000u64),
+        ("Tunnel-0001".to_string(), 700, 800),
     ];
     let (recv, sent, _) = aggregate_interface_bytes(&ifaces);
     assert_eq!(recv, 1_700);
