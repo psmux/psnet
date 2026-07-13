@@ -27,11 +27,96 @@ pub fn get_network_bytes(networks: &Networks) -> (u64, u64, String) {
 /// fall back to the name-based shadow heuristic rather than losing all totals.
 #[cfg(windows)]
 pub fn uplink_interface_names() -> Option<HashSet<String>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_ADDRESSES_LH;
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    let buf = adapters_buffer()?;
+    let mut names = HashSet::new();
+    // SAFETY: on success buf holds a valid linked list of IP_ADAPTER_ADDRESSES_LH.
+    let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !cur.is_null() {
+        let adapter = unsafe { &*cur };
+        let up = adapter.OperStatus == IfOperStatusUp;
+        let has_gateway = !adapter.FirstGatewayAddress.is_null();
+        if up && has_gateway {
+            if let Some(name) = wide_to_string(adapter.FriendlyName) {
+                names.insert(name);
+            }
+        }
+        cur = adapter.Next;
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn uplink_interface_names() -> Option<HashSet<String>> {
+    None
+}
+
+/// Raw IPv4 address (network byte order) of the first up adapter that owns a
+/// default gateway — the machine's real internet uplink. The packet sniffer
+/// binds here so it captures the wire the internet traffic actually crosses;
+/// resolving the hostname instead can hand back a Hyper-V/WSL or VPN adapter
+/// address depending on registration order (issue #6).
+#[cfg(windows)]
+pub fn uplink_ipv4() -> Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_ADDRESSES_LH;
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+
+    let buf = adapters_buffer()?;
+    // SAFETY: on success buf holds a valid linked list of IP_ADAPTER_ADDRESSES_LH.
+    let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !cur.is_null() {
+        let adapter = unsafe { &*cur };
+        let up = adapter.OperStatus == IfOperStatusUp;
+        let has_gateway = !adapter.FirstGatewayAddress.is_null();
+        if up && has_gateway {
+            let mut uni = adapter.FirstUnicastAddress;
+            while !uni.is_null() {
+                // SAFETY: unicast entries and their sockaddr pointers are
+                // owned by the same buffer.
+                let entry = unsafe { &*uni };
+                let sa = entry.Address.lpSockaddr;
+                if !sa.is_null() {
+                    let family = unsafe { (*sa).sa_family };
+                    if family == AF_INET {
+                        let sin = unsafe { &*(sa as *const SOCKADDR_IN) };
+                        // S_un is a union of u32 / bytes / words over the
+                        // same 4 octets; the u32 view is already in network
+                        // byte order.
+                        let raw = unsafe { sin.sin_addr.S_un.S_addr };
+                        if raw != 0 {
+                            return Some(raw);
+                        }
+                    }
+                }
+                uni = entry.Next;
+            }
+        }
+        cur = adapter.Next;
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn uplink_ipv4() -> Option<u32> {
+    None
+}
+
+/// Fetch the adapter table via GetAdaptersAddresses (with gateway info).
+/// Returns the raw buffer holding the IP_ADAPTER_ADDRESSES_LH linked list,
+/// or None when the query fails.
+#[cfg(windows)]
+fn adapters_buffer() -> Option<Vec<u8>> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST,
         GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
     };
-    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 
     const ERROR_SUCCESS: u32 = 0;
@@ -65,31 +150,7 @@ pub fn uplink_interface_names() -> Option<HashSet<String>> {
     if ret != ERROR_SUCCESS {
         return None;
     }
-
-    let mut names = HashSet::new();
-    // SAFETY: on success buf holds a valid linked list of IP_ADAPTER_ADDRESSES_LH.
-    let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-    while !cur.is_null() {
-        let adapter = unsafe { &*cur };
-        let up = adapter.OperStatus == IfOperStatusUp;
-        let has_gateway = !adapter.FirstGatewayAddress.is_null();
-        if up && has_gateway {
-            if let Some(name) = wide_to_string(adapter.FriendlyName) {
-                names.insert(name);
-            }
-        }
-        cur = adapter.Next;
-    }
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
-    }
-}
-
-#[cfg(not(windows))]
-pub fn uplink_interface_names() -> Option<HashSet<String>> {
-    None
+    Some(buf)
 }
 
 /// Read a NUL-terminated UTF-16 string from a Windows PWSTR.

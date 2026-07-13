@@ -73,6 +73,9 @@ pub struct App {
     // ─── GlassWire-style modules ─────────────────────────────────────
     /// Per-app bandwidth tracking
     pub bandwidth_tracker: BandwidthTracker,
+    /// Previous byte counters of virtual switch adapters (vEthernet), used
+    /// to credit NAT-forwarded WSL/VM traffic that the sniffer cannot see.
+    prev_vswitch_bytes: HashMap<String, (u64, u64)>,
     /// Alert engine (security + network alerts)
     pub alert_engine: AlertEngine,
     /// LAN device scanner
@@ -215,6 +218,7 @@ impl App {
 
             // GlassWire-style modules
             bandwidth_tracker: BandwidthTracker::new(),
+            prev_vswitch_bytes: HashMap::new(),
             alert_engine: AlertEngine::new(1000),
             network_scanner: NetworkScanner::new(),
             networks_scanner: NetworksScanner::new(None), // primary_ip set after first scan
@@ -393,10 +397,38 @@ impl App {
 
         // Feed sniffer packets into traffic log as DATA events
         let new_packets = self.sniffer.drain_new();
+
+        // Per-app bandwidth tracking from sniffer data. Runs even with no new
+        // packets so unmatched packets held from last tick get their retry
+        // against the fresh connection table.
+        self.bandwidth_tracker.ingest_packets(&new_packets, &self.connections);
+
+        // WSL2 / Hyper-V VM traffic is forwarded by WinNAT in the kernel:
+        // no host socket owns it and SIO_RCVALL never surfaces the packets,
+        // so the sniffer cannot attribute it. The virtual switch byte
+        // counters do carry it; credit their per-tick deltas to the
+        // [wsl/vm] pseudo-app. Bytes the switch sent into the VM are VM
+        // downloads, bytes received from the VM are VM uploads.
+        {
+            let mut vm_down: u64 = 0;
+            let mut vm_up: u64 = 0;
+            for (name, data) in networks.iter() {
+                if !name.starts_with("vEthernet") {
+                    continue;
+                }
+                let recv = data.total_received();
+                let sent = data.total_transmitted();
+                if let Some((prev_recv, prev_sent)) = self.prev_vswitch_bytes.get(name) {
+                    vm_down += sent.saturating_sub(*prev_sent);
+                    vm_up += recv.saturating_sub(*prev_recv);
+                }
+                self.prev_vswitch_bytes.insert(name.clone(), (recv, sent));
+            }
+            self.bandwidth_tracker.credit_virtual(vm_down, vm_up);
+        }
+
         if !new_packets.is_empty() {
             self.traffic_tracker.ingest_packets(&new_packets, &self.connections, &self.dns_cache);
-            // Per-app bandwidth tracking from sniffer data
-            self.bandwidth_tracker.ingest_packets(&new_packets, &self.connections);
 
             // Feed protocol tracker from new packets
             for pkt in &new_packets {
@@ -483,12 +515,18 @@ impl App {
 
         // ─── GlassWire-style module updates ──────────────────────────
 
-        // Estimate per-app bandwidth from connections when sniffer has no data
-        self.bandwidth_tracker.estimate_from_connections(
-            &self.connections,
-            self.current_down_speed,
-            self.current_up_speed,
-        );
+        // Estimate per-app bandwidth from connections only when the sniffer
+        // is not running (non-admin). With a live sniffer, ticks it attributes
+        // nothing on are genuinely quiet for host apps; distributing the
+        // system-wide speed anyway smeared unattributable (e.g. WSL/VM) bytes
+        // across arbitrary processes with open connections (issue #6).
+        if !self.sniffer.active.load(std::sync::atomic::Ordering::Relaxed) {
+            self.bandwidth_tracker.estimate_from_connections(
+                &self.connections,
+                self.current_down_speed,
+                self.current_up_speed,
+            );
+        }
 
         // Finish bandwidth tick (update connection counts, push speed samples)
         self.bandwidth_tracker.finish_tick(&self.connections);

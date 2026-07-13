@@ -205,8 +205,11 @@ fn sniffer_thread(
             return;
         }
 
-        // Get local IP
-        let local_ip = match get_local_ipv4() {
+        // Get local IP. Prefer the gateway-owning uplink adapter: that is the
+        // wire all internet traffic (including NAT-forwarded WSL/VM flows)
+        // actually crosses. Hostname resolution can return a Hyper-V/WSL or
+        // VPN adapter first, which would capture only that virtual switch.
+        let local_ip = match crate::network::uplink::uplink_ipv4().or_else(|| get_local_ipv4()) {
             Some(ip) => ip,
             None => {
                 set_error(&error_msg, "Could not determine local IP");
