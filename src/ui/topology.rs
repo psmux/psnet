@@ -47,7 +47,6 @@ struct RemoteNode {
     country_code: Option<String>,
     #[allow(dead_code)]
     country_name: Option<String>,
-    flag: Option<String>,
     conn_count: usize,
     tcp_count: usize,
     udp_count: usize,
@@ -654,7 +653,12 @@ fn draw_single_remote_node(f: &mut Frame, area: Rect, node: &RemoteNode, is_sele
         INACTIVE
     };
 
-    // Title: IP + flag + country
+    // Title: IP + country code.
+    // Plain ASCII code only — the country flag emoji (Regional Indicator pair)
+    // has ambiguous width (Unicode counts each indicator as W=2) that confuses
+    // vt100 parsers in embedded terminals like psmux, producing accumulating
+    // column offsets that push each node box past the panel border. See the
+    // matching note in ui/connections.rs. (issue #7)
     let mut title_parts = vec![Span::styled(
         format!(" {} ", node.ip),
         Style::default()
@@ -665,12 +669,6 @@ fn draw_single_remote_node(f: &mut Frame, area: Rect, node: &RemoteNode, is_sele
             })
             .add_modifier(Modifier::BOLD),
     )];
-    if let Some(ref flag) = node.flag {
-        title_parts.push(Span::styled(
-            format!("{} ", flag),
-            Style::default().fg(Color::Rgb(170, 200, 230)),
-        ));
-    }
     if let Some(ref code) = node.country_code {
         title_parts.push(Span::styled(
             format!("{} ", code),
@@ -936,13 +934,9 @@ fn aggregate_remote_nodes(app: &App) -> Vec<RemoteNode> {
         let entry = map.entry(ip).or_insert_with(|| {
             let hostname = app.dns_cache.get(&ip).and_then(|opt| opt.clone());
 
-            let (country_code, country_name, flag) = match app.geoip.lookup(ip) {
-                Some(info) => (
-                    Some(info.code.to_string()),
-                    Some(info.name.to_string()),
-                    Some(info.flag.to_string()),
-                ),
-                None => (None, None, None),
+            let (country_code, country_name) = match app.geoip.lookup(ip) {
+                Some(info) => (Some(info.code.to_string()), Some(info.name.to_string())),
+                None => (None, None),
             };
 
             RemoteNode {
@@ -950,7 +944,6 @@ fn aggregate_remote_nodes(app: &App) -> Vec<RemoteNode> {
                 hostname,
                 country_code,
                 country_name,
-                flag,
                 conn_count: 0,
                 tcp_count: 0,
                 udp_count: 0,
