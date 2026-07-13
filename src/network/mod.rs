@@ -3,6 +3,7 @@ pub mod connections;
 pub mod dns;
 pub mod sniffer;
 pub mod speed;
+pub mod uplink;
 pub mod alerts;
 pub mod bandwidth;
 pub mod firewall;

@@ -20,7 +20,7 @@ use crate::network::protocols::ProtocolTracker;
 use crate::network::scanner::NetworkScanner;
 use crate::network::servers::ServersScanner;
 use crate::network::sniffer::PacketSniffer;
-use crate::network::speed::get_network_bytes;
+use crate::network::uplink::get_network_bytes;
 use crate::network::system_monitor::SystemMonitor;
 use crate::network::threats::ThreatDetector;
 use crate::network::usage::UsageTracker;
