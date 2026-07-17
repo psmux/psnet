@@ -129,7 +129,7 @@ pub fn draw_servers(f: &mut Frame, area: Rect, app: &App) {
     let tls_count = all.iter().filter(|s| s.details.contains("TLS: yes")).count();
 
     // Layout: dashboard strip + filter? + main list + detail panel
-    let has_filter = !sc.filter_text.is_empty();
+    let has_filter = !sc.filter_text.is_empty() || app.filter_editing;
     let filter_h = if has_filter { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -144,7 +144,7 @@ pub fn draw_servers(f: &mut Frame, area: Rect, app: &App) {
     draw_dashboard(f, chunks[0], all.len(), tcp_total, udp_total, up,
                    total_conns, tls_count, &bind_stats, sc.is_scanning());
     if has_filter {
-        draw_filter_bar(f, chunks[1], &sc.filter_text, entry_count);
+        draw_filter_bar(f, chunks[1], &sc.filter_text, entry_count, app.filter_editing);
     }
     draw_list(f, chunks[2], &rows, selected);
     draw_detail(f, chunks[3], &filtered, selected, &conn_counts);
@@ -418,10 +418,11 @@ fn draw_stats_panel(
 }
 
 /// Filter bar (shown only when filter is active)
-fn draw_filter_bar(f: &mut Frame, area: Rect, filter: &str, filtered: usize) {
+fn draw_filter_bar(f: &mut Frame, area: Rect, filter: &str, filtered: usize, editing: bool) {
+    let text = if editing { format!("{}_", filter) } else { filter.to_string() };
     let line = Line::from(vec![
         Span::styled(" \u{1F50D} ", Style::default().fg(YELLOW)),
-        Span::styled(filter.to_string(), Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(text, Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("  {} match{}", filtered, if filtered == 1 { "" } else { "es" }),
             Style::default().fg(DIM),

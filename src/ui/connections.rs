@@ -211,7 +211,9 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     // ── Title bar with tabs ──
-    let filter_info = if app.filter_text.is_empty() {
+    let filter_info = if app.filter_editing {
+        format!(" [filter: {}_]", app.filter_text)
+    } else if app.filter_text.is_empty() {
         String::new()
     } else {
         format!(" [filter: {}]", app.filter_text)

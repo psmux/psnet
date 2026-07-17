@@ -63,6 +63,25 @@ pub fn draw_key_hints(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // While the filter query is being edited, every printable key is typed into
+    // the query, so the normal key hints do not apply.
+    if app.filter_editing {
+        let mut spans = Vec::new();
+        for s in [
+            key_span("Type", "to filter"),
+            key_span("Enter", "Done"),
+            key_span("Esc", "Clear"),
+            key_span("Backspace", "Delete"),
+            key_span("Tab", "Switch"),
+        ] {
+            spans.extend(s);
+        }
+        let paragraph = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Rgb(20, 28, 50)));
+        f.render_widget(paragraph, area);
+        return;
+    }
+
     let incognito_label = format!("Incognito:{}", if app.incognito { "ON" } else { "OFF" });
     let common_keys = vec![
         key_span("q", "Quit"),

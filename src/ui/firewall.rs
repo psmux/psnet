@@ -19,7 +19,9 @@ pub fn draw_firewall(f: &mut Frame, area: Rect, app: &App) {
     let blocked_count = apps.iter().filter(|(_, b, _)| *b).count();
 
     let fw = &app.firewall_manager;
-    let filter_info = if fw.filter_text.is_empty() {
+    let filter_info = if app.filter_editing {
+        format!(" [filter: {}_]", fw.filter_text)
+    } else if fw.filter_text.is_empty() {
         String::new()
     } else {
         format!(" [filter: {}]", fw.filter_text)

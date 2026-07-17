@@ -210,7 +210,7 @@ Press `Tab` / `Shift+Tab` to cycle through them.
 | `1`-`5` | Sort by column |
 | `l` | Toggle LISTEN connections |
 | `x` | Toggle localhost filter |
-| `f` + typing | Live filter |
+| `f` + typing | Live filter (any key works while typing; `Enter` done, `Esc` clear) |
 
 ### Servers
 
@@ -219,7 +219,7 @@ Press `Tab` / `Shift+Tab` to cycle through them.
 | `s` | Trigger full scan (enumerate + probe + classify) |
 | `o` | Open server's folder in Explorer |
 | `y` | Copy exe path to clipboard |
-| `f` + typing | Live filter |
+| `f` + typing | Live filter (any key works while typing; `Enter` done, `Esc` clear) |
 
 ### Firewall
 

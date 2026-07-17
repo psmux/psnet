@@ -1075,7 +1075,17 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("PgUp/Dn:Scroll", Style::default().fg(Color::Yellow)),
     ];
 
-    if !app.packets_filter.is_empty() {
+    if app.filter_editing {
+        hints.push(Span::styled("  ", Style::default()));
+        hints.push(Span::styled("Enter:Done  Esc:Clear", Style::default().fg(Color::Yellow)));
+        hints.push(Span::styled("  ", Style::default()));
+        hints.push(Span::styled(
+            format!("[FILTER: {}_]", app.packets_filter),
+            Style::default()
+                .fg(Color::Rgb(255, 220, 100))
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if !app.packets_filter.is_empty() {
         hints.push(Span::styled("  ", Style::default()));
         hints.push(Span::styled("Esc:Clear filter", Style::default().fg(Color::Yellow)));
         hints.push(Span::styled("  ", Style::default()));
@@ -1087,7 +1097,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         ));
     } else {
         hints.push(Span::styled("  ", Style::default()));
-        hints.push(Span::styled("Type:Filter", Style::default().fg(Color::Rgb(60, 80, 110))));
+        hints.push(Span::styled("f:Filter", Style::default().fg(Color::Rgb(60, 80, 110))));
     }
 
     let footer = Paragraph::new(Line::from(hints))

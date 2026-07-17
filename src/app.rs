@@ -49,6 +49,9 @@ pub struct App {
     pub sort_ascending: bool,
     pub show_listen: bool,
     pub filter_text: String,
+    /// When true, all printable keys go into the active tab's filter query
+    /// instead of triggering their bound actions (issue #8).
+    pub filter_editing: bool,
 
     // Traffic tab
     pub traffic_tracker: TrafficTracker,
@@ -197,6 +200,7 @@ impl App {
             sort_ascending: true, // ESTABLISHED first (rank 0)
             show_listen: true,
             filter_text: String::new(),
+            filter_editing: false,
 
             traffic_tracker: TrafficTracker::new(5000),
 
@@ -993,6 +997,43 @@ impl App {
             return false;
         }
 
+        // Filter editing mode: every printable key belongs to the query, so keys
+        // that are normally bound (q, i, x, l, b, f, digits, ...) can be typed.
+        // Enter confirms, Esc clears and exits, Tab still switches tabs.
+        if self.filter_editing {
+            match code {
+                KeyCode::Char(c) => {
+                    if let Some(ft) = self.active_filter_mut() {
+                        ft.push(c);
+                    }
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    if let Some(ft) = self.active_filter_mut() {
+                        ft.pop();
+                    }
+                    return false;
+                }
+                KeyCode::Enter => {
+                    self.filter_editing = false;
+                    return false;
+                }
+                KeyCode::Esc => {
+                    if let Some(ft) = self.active_filter_mut() {
+                        ft.clear();
+                    }
+                    self.filter_editing = false;
+                    return false;
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    // Leave editing mode; fall through so the tab actually switches.
+                    self.filter_editing = false;
+                }
+                // Arrows / paging fall through so the filtered list can be scrolled live.
+                _ => {}
+            }
+        }
+
         match code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 if !self.incognito {
@@ -1192,6 +1233,17 @@ impl App {
         };
     }
 
+    /// The filter query string owned by the active tab, if it has one.
+    fn active_filter_mut(&mut self) -> Option<&mut String> {
+        match self.bottom_tab {
+            BottomTab::Connections => Some(&mut self.filter_text),
+            BottomTab::Servers => Some(&mut self.servers_scanner.filter_text),
+            BottomTab::Packets => Some(&mut self.packets_filter),
+            BottomTab::Firewall => Some(&mut self.firewall_manager.filter_text),
+            _ => None,
+        }
+    }
+
     fn handle_connections_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('l') | KeyCode::Char('L') => {
@@ -1223,12 +1275,8 @@ impl App {
             }
             KeyCode::Backspace => { self.filter_text.pop(); }
             KeyCode::Esc => { self.filter_text.clear(); }
-            KeyCode::Char(c) => {
-                if c == 'f' || c == 'F' {
-                    // 'f' starts filter mode
-                } else {
-                    self.filter_text.push(c);
-                }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.filter_editing = true;
             }
             _ => {}
         }
@@ -1304,8 +1352,8 @@ impl App {
             }
             KeyCode::Backspace => { self.servers_scanner.filter_text.pop(); }
             KeyCode::Esc => { self.servers_scanner.filter_text.clear(); }
-            KeyCode::Char(c) if !c.is_ascii_digit() => {
-                self.servers_scanner.filter_text.push(c);
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.filter_editing = true;
             }
             _ => {}
         }
@@ -1450,8 +1498,8 @@ impl App {
             }
             KeyCode::Backspace => { self.firewall_manager.filter_text.pop(); }
             KeyCode::Esc => { self.firewall_manager.filter_text.clear(); }
-            KeyCode::Char(c) => {
-                self.firewall_manager.filter_text.push(c);
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.filter_editing = true;
             }
             _ => {}
         }
@@ -1562,8 +1610,8 @@ impl App {
                     self.packets_detail_open = false;
                 }
             }
-            KeyCode::Char(c) => {
-                self.packets_filter.push(c);
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.filter_editing = true;
             }
             _ => {}
         }
@@ -2002,4 +2050,123 @@ fn column_from_x(x: u16, widths: &[u16], total_width: u16) -> Option<usize> {
         cursor += actual_w;
     }
     None
+}
+
+// Regression tests for issue #8: keys bound to TUI actions (q, i, x, l, b,
+// digits, ...) could not be typed into a filter query because their action
+// arms matched before the filter catch-all. Filter input is now an explicit
+// editing mode entered with 'f'.
+#[cfg(test)]
+mod filter_mode_tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let networks = Networks::new_with_refreshed_list();
+        let mut app = App::new(&networks);
+        app.bottom_tab = BottomTab::Connections;
+        app
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            assert!(!app.handle_key(KeyCode::Char(c)), "typing '{}' must not quit the app", c);
+        }
+    }
+
+    #[test]
+    fn f_enters_filter_mode_and_firefox_is_typed_verbatim() {
+        let mut app = test_app();
+        let incognito_before = app.incognito;
+        let localhost_before = app.hide_localhost_conn;
+        let listen_before = app.show_listen;
+        let sort_before = (app.sort_column, app.sort_ascending);
+
+        app.handle_key(KeyCode::Char('f'));
+        assert!(app.filter_editing, "'f' must enter filter editing mode");
+        type_str(&mut app, "firefox");
+
+        assert_eq!(app.filter_text, "firefox", "every letter of 'firefox' must land in the query");
+        assert_eq!(app.incognito, incognito_before, "'i' must not toggle incognito while editing");
+        assert_eq!(app.hide_localhost_conn, localhost_before, "'x' must not toggle localhost while editing");
+        assert_eq!(app.show_listen, listen_before);
+        assert_eq!((app.sort_column, app.sort_ascending), sort_before);
+    }
+
+    #[test]
+    fn q_and_digits_are_text_while_editing() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('f'));
+        type_str(&mut app, "sq1lite3");
+        assert_eq!(app.filter_text, "sq1lite3");
+    }
+
+    #[test]
+    fn backspace_deletes_while_editing() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('f'));
+        type_str(&mut app, "fire");
+        app.handle_key(KeyCode::Backspace);
+        app.handle_key(KeyCode::Backspace);
+        assert_eq!(app.filter_text, "fi");
+    }
+
+    #[test]
+    fn enter_confirms_and_restores_action_keys() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('f'));
+        type_str(&mut app, "chrome");
+        app.handle_key(KeyCode::Enter);
+        assert!(!app.filter_editing, "Enter must leave editing mode");
+        assert_eq!(app.filter_text, "chrome", "confirmed filter must persist");
+
+        let localhost_before = app.hide_localhost_conn;
+        app.handle_key(KeyCode::Char('x'));
+        assert_ne!(app.hide_localhost_conn, localhost_before, "'x' must act again after Enter");
+    }
+
+    #[test]
+    fn esc_clears_and_exits_editing() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('f'));
+        type_str(&mut app, "spotify");
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.filter_editing, "Esc must leave editing mode");
+        assert!(app.filter_text.is_empty(), "Esc must clear the query");
+    }
+
+    #[test]
+    fn q_still_quits_when_not_editing() {
+        let mut app = test_app();
+        app.incognito = true; // skip disk writes in the quit path
+        assert!(app.handle_key(KeyCode::Char('q')), "'q' must quit outside filter editing");
+    }
+
+    #[test]
+    fn tab_switch_exits_editing() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Char('f'));
+        type_str(&mut app, "ssh");
+        app.handle_key(KeyCode::Tab);
+        assert!(!app.filter_editing, "switching tabs must leave editing mode");
+        assert_ne!(app.bottom_tab, BottomTab::Connections, "Tab must still switch tabs");
+        assert_eq!(app.filter_text, "ssh", "query survives the tab switch");
+    }
+
+    #[test]
+    fn f_enters_editing_on_all_filterable_tabs() {
+        for tab in [BottomTab::Servers, BottomTab::Packets, BottomTab::Firewall] {
+            let mut app = test_app();
+            app.bottom_tab = tab;
+            app.handle_key(KeyCode::Char('f'));
+            assert!(app.filter_editing, "'f' must enter editing on {:?}", tab);
+            type_str(&mut app, "sx1");
+            let text = match tab {
+                BottomTab::Servers => app.servers_scanner.filter_text.clone(),
+                BottomTab::Packets => app.packets_filter.clone(),
+                BottomTab::Firewall => app.firewall_manager.filter_text.clone(),
+                _ => unreachable!(),
+            };
+            assert_eq!(text, "sx1", "typed text must reach the {:?} filter", tab);
+        }
+    }
 }
