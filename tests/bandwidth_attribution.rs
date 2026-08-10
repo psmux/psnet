@@ -62,6 +62,7 @@ fn conn(local_port: u16, remote_port: u16, process: &str) -> Connection {
         pid: 1234,
         process_name: process.to_string(),
         dns_hostname: None,
+        module_name: None,
     }
 }
 

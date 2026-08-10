@@ -109,6 +109,10 @@ pub struct Connection {
     pub process_name: String,
     /// DNS-resolved hostname for remote address (if available).
     pub dns_hostname: Option<String>,
+    /// Owning service/module resolved via GetOwnerModuleFrom*Entry.
+    /// Only populated for service-hosting processes (svchost.exe), where the
+    /// exe name alone does not identify what is actually using the socket.
+    pub module_name: Option<String>,
 }
 
 /// Unique key for identifying a connection across ticks.
@@ -302,6 +306,12 @@ impl TrafficHistory {
 // ─── Process name cache ──────────────────────────────────────────────────────
 
 pub type PidCache = HashMap<u32, String>;
+
+/// Cache of resolved owner modules keyed by (pid, local_port, proto).
+/// `None` records a failed lookup so it is not retried every tick. Entries
+/// whose socket disappears are pruned each refresh, so the cache never
+/// outgrows the live connection table.
+pub type ModuleCache = HashMap<(u32, u16, ConnProto), Option<String>>;
 
 // ─── Packet snippet (for live wire preview) ──────────────────────────────────
 

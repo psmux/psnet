@@ -26,9 +26,10 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
         .fg(Color::Rgb(160, 180, 220))
         .add_modifier(Modifier::BOLD);
 
-    // ── Redesigned columns: Process | Remote Host | Country | Service | State | Local ──
+    // ── Columns: Process | PID | Remote Host | Country | Service | State | Local ──
     let header = Row::new(vec![
         Cell::from(Span::styled(format!("Process{}", sort_ind(6)), hdr_style)),
+        Cell::from(Span::styled(format!("PID{}", sort_ind(7)), hdr_style)),
         Cell::from(Span::styled(format!("Remote Host{}", sort_ind(3)), hdr_style)),
         Cell::from(Span::styled("Geo", hdr_style)),
         Cell::from(Span::styled(format!("Service{}", sort_ind(4)), hdr_style)),
@@ -63,9 +64,13 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
         .map(|(idx, conn)| {
             let is_selected = idx == selected;
             // ── Process name ──
+            // Resolved service/module names (svchost) take over the cell so the
+            // user sees WHAT owns the socket, not just the generic host exe.
             let proc_name = &conn.process_name;
             let proc_display = {
-                let base = if proc_name.starts_with("PID:") {
+                let base = if let Some(module) = conn.module_name.as_ref() {
+                    module.clone()
+                } else if proc_name.starts_with("PID:") {
                     format!("[{}]", &proc_name[4..])
                 } else {
                     proc_name.clone()
@@ -78,11 +83,16 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
                 };
                 if is_selected { format!("\u{25B8} {}", base) } else { format!("  {}", base) }
             };
-            let proc_color = if proc_name.starts_with("PID:") || proc_name.starts_with('[') {
+            let proc_color = if conn.module_name.is_some() {
+                Color::Rgb(190, 140, 255)
+            } else if proc_name.starts_with("PID:") || proc_name.starts_with('[') {
                 Color::Rgb(90, 100, 125)
             } else {
                 Color::Rgb(130, 200, 140)
             };
+
+            // ── PID ──
+            let pid_str = conn.pid.to_string();
 
             // ── Remote Host (the star column) ──
             let (remote_display, remote_color) = match (&conn.dns_hostname, conn.remote_addr) {
@@ -174,6 +184,14 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(Span::styled(proc_display, Style::default().fg(proc_color))),
                 Cell::from(Span::styled(
+                    pid_str,
+                    Style::default().fg(if dim {
+                        Color::Rgb(60, 70, 90)
+                    } else {
+                        Color::Rgb(120, 130, 160)
+                    }),
+                )),
+                Cell::from(Span::styled(
                     remote_display,
                     Style::default().fg(remote_color).add_modifier(
                         if remote_bold && !dim {
@@ -255,9 +273,13 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
         let remote_str = conn.dns_hostname.clone()
             .or_else(|| conn.remote_addr.map(|ip| ip.to_string()))
             .unwrap_or_else(|| "*".to_string());
+        let proc_detail = match conn.module_name.as_ref() {
+            Some(module) => format!("{} ({})", conn.process_name, module),
+            None => conn.process_name.clone(),
+        };
         Line::from(vec![
             Span::styled(" \u{25B8} ", Style::default().fg(Color::Rgb(100, 200, 255)).add_modifier(Modifier::BOLD)),
-            Span::styled(conn.process_name.clone(), Style::default().fg(Color::Rgb(130, 200, 140)).add_modifier(Modifier::BOLD)),
+            Span::styled(proc_detail, Style::default().fg(Color::Rgb(130, 200, 140)).add_modifier(Modifier::BOLD)),
             Span::styled(" \u{2192} ", Style::default().fg(Color::Rgb(60, 80, 110))),
             Span::styled(remote_str, Style::default().fg(Color::Rgb(100, 220, 255))),
             Span::styled(" \u{2502} ", Style::default().fg(Color::Rgb(40, 55, 80))),
@@ -271,6 +293,7 @@ pub fn draw_connections(f: &mut Frame, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(20),  // Process (wider for ▸ prefix)
+            Constraint::Length(7),   // PID
             Constraint::Min(22),     // Remote Host (widest — the star)
             Constraint::Length(7),   // Geo (flag + code)
             Constraint::Length(14),  // Service

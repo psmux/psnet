@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::types::{ConnProto, Connection, PidCache, TcpState};
+use crate::types::{ConnProto, Connection, ModuleCache, PidCache, TcpState};
 use crate::utils::ntohs;
 
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -76,10 +77,104 @@ struct MIB_UDP6TABLE_OWNER_PID {
     table: [MIB_UDP6ROW_OWNER_PID; 1],
 }
 
+// ─── OWNER_MODULE variants (for GetOwnerModuleFrom*Entry) ────────────────────
+
+const TCPIP_OWNING_MODULE_SIZE: usize = 16;
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_TCPROW_OWNER_MODULE {
+    dwState: u32,
+    dwLocalAddr: u32,
+    dwLocalPort: u32,
+    dwRemoteAddr: u32,
+    dwRemotePort: u32,
+    dwOwningPid: u32,
+    liCreateTimestamp: i64,
+    OwningModuleInfo: [u64; TCPIP_OWNING_MODULE_SIZE],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_TCPTABLE_OWNER_MODULE {
+    dwNumEntries: u32,
+    table: [MIB_TCPROW_OWNER_MODULE; 1],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_TCP6ROW_OWNER_MODULE {
+    ucLocalAddr: [u8; 16],
+    dwLocalScopeId: u32,
+    dwLocalPort: u32,
+    ucRemoteAddr: [u8; 16],
+    dwRemoteScopeId: u32,
+    dwRemotePort: u32,
+    dwState: u32,
+    dwOwningPid: u32,
+    liCreateTimestamp: i64,
+    OwningModuleInfo: [u64; TCPIP_OWNING_MODULE_SIZE],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_TCP6TABLE_OWNER_MODULE {
+    dwNumEntries: u32,
+    table: [MIB_TCP6ROW_OWNER_MODULE; 1],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_UDPROW_OWNER_MODULE {
+    dwLocalAddr: u32,
+    dwLocalPort: u32,
+    dwOwningPid: u32,
+    liCreateTimestamp: i64,
+    dwFlags: i32,
+    OwningModuleInfo: [u64; TCPIP_OWNING_MODULE_SIZE],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_UDPTABLE_OWNER_MODULE {
+    dwNumEntries: u32,
+    table: [MIB_UDPROW_OWNER_MODULE; 1],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_UDP6ROW_OWNER_MODULE {
+    ucLocalAddr: [u8; 16],
+    dwLocalScopeId: u32,
+    dwLocalPort: u32,
+    dwOwningPid: u32,
+    liCreateTimestamp: i64,
+    dwFlags: i32,
+    OwningModuleInfo: [u64; TCPIP_OWNING_MODULE_SIZE],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct MIB_UDP6TABLE_OWNER_MODULE {
+    dwNumEntries: u32,
+    table: [MIB_UDP6ROW_OWNER_MODULE; 1],
+}
+
+#[repr(C)]
+#[allow(non_snake_case, non_camel_case_types)]
+struct TCPIP_OWNER_MODULE_BASIC_INFO {
+    pModuleName: *mut u16,
+    pModulePath: *mut u16,
+}
+
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 23;
 const TCP_TABLE_OWNER_PID_ALL: u32 = 5;
 const UDP_TABLE_OWNER_PID: u32 = 1;
+const TCP_TABLE_OWNER_MODULE_ALL: u32 = 8;
+const UDP_TABLE_OWNER_MODULE: u32 = 2;
+const TCPIP_OWNER_MODULE_INFO_BASIC: u32 = 0;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[link(name = "iphlpapi")]
 extern "system" {
@@ -98,6 +193,30 @@ extern "system" {
         ulAf: u32,
         TableClass: u32,
         Reserved: u32,
+    ) -> u32;
+    fn GetOwnerModuleFromTcpEntry(
+        pTcpEntry: *const MIB_TCPROW_OWNER_MODULE,
+        Class: u32,
+        pBuffer: *mut u8,
+        pdwSize: *mut u32,
+    ) -> u32;
+    fn GetOwnerModuleFromTcp6Entry(
+        pTcpEntry: *const MIB_TCP6ROW_OWNER_MODULE,
+        Class: u32,
+        pBuffer: *mut u8,
+        pdwSize: *mut u32,
+    ) -> u32;
+    fn GetOwnerModuleFromUdpEntry(
+        pUdpEntry: *const MIB_UDPROW_OWNER_MODULE,
+        Class: u32,
+        pBuffer: *mut u8,
+        pdwSize: *mut u32,
+    ) -> u32;
+    fn GetOwnerModuleFromUdp6Entry(
+        pUdpEntry: *const MIB_UDP6ROW_OWNER_MODULE,
+        Class: u32,
+        pBuffer: *mut u8,
+        pdwSize: *mut u32,
     ) -> u32;
 }
 
@@ -236,6 +355,7 @@ fn fetch_tcp4(conns: &mut Vec<Connection>) {
                 pid: row.dwOwningPid,
                 process_name: String::new(),
                 dns_hostname: None,
+                module_name: None,
             });
         }
     }
@@ -268,6 +388,7 @@ fn fetch_tcp6(conns: &mut Vec<Connection>) {
                 pid: row.dwOwningPid,
                 process_name: String::new(),
                 dns_hostname: None,
+                module_name: None,
             });
         }
     }
@@ -300,7 +421,178 @@ fn fetch_udp4(conns: &mut Vec<Connection>) {
                 pid: row.dwOwningPid,
                 process_name: String::new(),
                 dns_hostname: None,
+                module_name: None,
             });
+        }
+    }
+}
+
+// ─── Owner module resolution (svchost service names) ─────────────────────────
+
+/// PIDs in the current table that host multiple services behind one exe name,
+/// where the exe alone does not tell the user what owns the socket.
+pub fn service_host_pids(conns: &[Connection], pid_cache: &PidCache) -> HashSet<u32> {
+    conns
+        .iter()
+        .filter(|c| {
+            pid_cache
+                .get(&c.pid)
+                .map(|n| n.eq_ignore_ascii_case("svchost.exe"))
+                .unwrap_or(false)
+        })
+        .map(|c| c.pid)
+        .collect()
+}
+
+/// Two-call pattern shared by all four GetOwnerModuleFrom*Entry wrappers:
+/// first call sizes the buffer, second fills TCPIP_OWNER_MODULE_BASIC_INFO
+/// (two pointers into the same buffer holding the name/path strings).
+unsafe fn read_module_name(call: &dyn Fn(*mut u8, *mut u32) -> u32) -> Option<String> {
+    let mut size: u32 = 0;
+    let ret = call(std::ptr::null_mut(), &mut size);
+    if ret != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if call(buf.as_mut_ptr(), &mut size) != 0 {
+        return None;
+    }
+    let info = &*(buf.as_ptr() as *const TCPIP_OWNER_MODULE_BASIC_INFO);
+    if info.pModuleName.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while *info.pModuleName.add(len) != 0 {
+        len += 1;
+    }
+    let name = String::from_utf16_lossy(std::slice::from_raw_parts(info.pModuleName, len));
+    let name = name.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+/// Resolves the owning service/module for sockets whose PID is in `pids` and
+/// applies results to `conns`. Failed lookups are cached as `None` so they are
+/// not retried every tick; entries for dead sockets are pruned to keep the
+/// cache bounded by the live table size.
+pub fn resolve_owner_modules(
+    conns: &mut [Connection],
+    pids: &HashSet<u32>,
+    module_cache: &mut ModuleCache,
+) {
+    if !pids.is_empty() {
+        resolve_tcp4_modules(pids, module_cache);
+        resolve_tcp6_modules(pids, module_cache);
+        resolve_udp4_modules(pids, module_cache);
+        resolve_udp6_modules(pids, module_cache);
+    }
+
+    let mut live_keys: HashSet<(u32, u16, ConnProto)> = HashSet::with_capacity(conns.len());
+    for conn in conns.iter_mut() {
+        let key = (conn.pid, conn.local_port, conn.proto.clone());
+        if let Some(Some(name)) = module_cache.get(&key) {
+            conn.module_name = Some(name.clone());
+        }
+        live_keys.insert(key);
+    }
+    module_cache.retain(|k, _| live_keys.contains(k));
+}
+
+fn resolve_tcp4_modules(pids: &HashSet<u32>, cache: &mut ModuleCache) {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedTcpTable(
+            std::ptr::null_mut(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0,
+        );
+        if size == 0 { return; }
+        let mut buf = vec![0u8; size as usize];
+        if GetExtendedTcpTable(
+            buf.as_mut_ptr(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0,
+        ) != 0 { return; }
+        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_MODULE);
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+        for row in rows {
+            if !pids.contains(&row.dwOwningPid) { continue; }
+            let key = (row.dwOwningPid, ntohs(row.dwLocalPort), ConnProto::Tcp);
+            if cache.contains_key(&key) { continue; }
+            let name = read_module_name(&|b, s| {
+                GetOwnerModuleFromTcpEntry(row, TCPIP_OWNER_MODULE_INFO_BASIC, b, s)
+            });
+            cache.insert(key, name);
+        }
+    }
+}
+
+fn resolve_tcp6_modules(pids: &HashSet<u32>, cache: &mut ModuleCache) {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedTcpTable(
+            std::ptr::null_mut(), &mut size, 0, AF_INET6, TCP_TABLE_OWNER_MODULE_ALL, 0,
+        );
+        if size == 0 { return; }
+        let mut buf = vec![0u8; size as usize];
+        if GetExtendedTcpTable(
+            buf.as_mut_ptr(), &mut size, 0, AF_INET6, TCP_TABLE_OWNER_MODULE_ALL, 0,
+        ) != 0 { return; }
+        let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_MODULE);
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+        for row in rows {
+            if !pids.contains(&row.dwOwningPid) { continue; }
+            let key = (row.dwOwningPid, ntohs(row.dwLocalPort), ConnProto::Tcp);
+            if cache.contains_key(&key) { continue; }
+            let name = read_module_name(&|b, s| {
+                GetOwnerModuleFromTcp6Entry(row, TCPIP_OWNER_MODULE_INFO_BASIC, b, s)
+            });
+            cache.insert(key, name);
+        }
+    }
+}
+
+fn resolve_udp4_modules(pids: &HashSet<u32>, cache: &mut ModuleCache) {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedUdpTable(
+            std::ptr::null_mut(), &mut size, 0, AF_INET, UDP_TABLE_OWNER_MODULE, 0,
+        );
+        if size == 0 { return; }
+        let mut buf = vec![0u8; size as usize];
+        if GetExtendedUdpTable(
+            buf.as_mut_ptr(), &mut size, 0, AF_INET, UDP_TABLE_OWNER_MODULE, 0,
+        ) != 0 { return; }
+        let table = &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_MODULE);
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+        for row in rows {
+            if !pids.contains(&row.dwOwningPid) { continue; }
+            let key = (row.dwOwningPid, ntohs(row.dwLocalPort), ConnProto::Udp);
+            if cache.contains_key(&key) { continue; }
+            let name = read_module_name(&|b, s| {
+                GetOwnerModuleFromUdpEntry(row, TCPIP_OWNER_MODULE_INFO_BASIC, b, s)
+            });
+            cache.insert(key, name);
+        }
+    }
+}
+
+fn resolve_udp6_modules(pids: &HashSet<u32>, cache: &mut ModuleCache) {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedUdpTable(
+            std::ptr::null_mut(), &mut size, 0, AF_INET6, UDP_TABLE_OWNER_MODULE, 0,
+        );
+        if size == 0 { return; }
+        let mut buf = vec![0u8; size as usize];
+        if GetExtendedUdpTable(
+            buf.as_mut_ptr(), &mut size, 0, AF_INET6, UDP_TABLE_OWNER_MODULE, 0,
+        ) != 0 { return; }
+        let table = &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_MODULE);
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+        for row in rows {
+            if !pids.contains(&row.dwOwningPid) { continue; }
+            let key = (row.dwOwningPid, ntohs(row.dwLocalPort), ConnProto::Udp);
+            if cache.contains_key(&key) { continue; }
+            let name = read_module_name(&|b, s| {
+                GetOwnerModuleFromUdp6Entry(row, TCPIP_OWNER_MODULE_INFO_BASIC, b, s)
+            });
+            cache.insert(key, name);
         }
     }
 }
@@ -332,6 +624,7 @@ fn fetch_udp6(conns: &mut Vec<Connection>) {
                 pid: row.dwOwningPid,
                 process_name: String::new(),
                 dns_hostname: None,
+                module_name: None,
             });
         }
     }

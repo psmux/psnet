@@ -62,7 +62,9 @@ fn draw_connection_detail(f: &mut Frame, area: Rect, conn: &crate::types::Connec
 
     let state_str = conn.state.as_ref().map(|s| s.label().to_string()).unwrap_or_else(|| "\u{2014}".to_string());
     let state_color = conn.state.as_ref().map(|s| s.color()).unwrap_or(Color::Gray);
-    let country_str = geo.map(|g| format!("{} {} ({})", g.flag, g.name, g.code)).unwrap_or_else(|| "Local / Private".to_string());
+    // Country code + name only. Flag emoji (Regional Indicator pairs) have
+    // ambiguous width that breaks embedded terminals (see issue #7).
+    let country_str = geo.map(|g| format!("{} ({})", g.name, g.code)).unwrap_or_else(|| "Local / Private".to_string());
     let remote_addr_str = conn.remote_addr
         .map(|ip| format!("{}:{}", ip, conn.remote_port.unwrap_or(0)))
         .unwrap_or_else(|| "\u{2014}".to_string());
@@ -71,6 +73,7 @@ fn draw_connection_detail(f: &mut Frame, area: Rect, conn: &crate::types::Connec
     lines.push(row("Protocol",    conn.proto.label().to_string(),                   Color::Rgb(100, 220, 255)));
     lines.push(row("Process",     conn.process_name.clone(),                        Color::Rgb(130, 200, 140)));
     lines.push(row("PID",         conn.pid.to_string(),                             Color::Rgb(120, 130, 160)));
+    lines.push(row("Module",      conn.module_name.clone().unwrap_or_else(|| "\u{2014}".to_string()), Color::Rgb(190, 140, 255)));
     lines.push(row("Direction",   if conn.is_outbound() { "Outbound \u{2192}" } else { "Inbound \u{2190}" }.to_string(), Color::Rgb(200, 180, 100)));
     lines.push(row("Local",       format!("{}:{}", conn.local_addr, conn.local_port), Color::Rgb(150, 160, 190)));
     lines.push(row("Remote",      remote_addr_str,                                  Color::Rgb(170, 185, 210)));

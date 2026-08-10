@@ -96,7 +96,7 @@ pub fn draw_key_hints(f: &mut Frame, area: Rect, app: &App) {
             key_span("1-4", "Time Range"),
         ],
         BottomTab::Connections => vec![
-            key_span("1-5", "Sort"),
+            key_span("1-6", "Sort"),
             key_span("b", "Block"),
             key_span("l", &format!("Listen:{}", if app.show_listen { "ON" } else { "OFF" })),
             key_span("x", &format!("{}", if app.hide_localhost_conn { "Show Local" } else { "Hide Local" })),

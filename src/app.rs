@@ -162,6 +162,7 @@ pub struct App {
 
     // Internal
     pid_cache: PidCache,
+    module_cache: crate::types::ModuleCache,
     pub dns_cache: DnsCache,
     dns_tick: u32,
 
@@ -270,6 +271,7 @@ impl App {
             last_frame_size: Rect::default(),
 
             pid_cache: PidCache::new(),
+            module_cache: crate::types::ModuleCache::new(),
             dns_cache: DnsCache::new(),
             dns_tick: 0,
 
@@ -365,6 +367,14 @@ impl App {
 
         // Fetch connections
         self.connections = fetch_connections(&mut self.pid_cache);
+        // Resolve the owning service behind svchost sockets (issue #3)
+        let host_pids =
+            crate::network::connections::service_host_pids(&self.connections, &self.pid_cache);
+        crate::network::connections::resolve_owner_modules(
+            &mut self.connections,
+            &host_pids,
+            &mut self.module_cache,
+        );
 
         // Resolve DNS for remote addresses
         if !self.disabled.contains("dns") {
@@ -785,6 +795,7 @@ impl App {
                 // Case-insensitive byte-by-byte comparison — no .to_lowercase() allocation
                 6 => a.process_name.bytes().map(|b| b.to_ascii_lowercase())
                     .cmp(b.process_name.bytes().map(|b| b.to_ascii_lowercase())),
+                7 => a.pid.cmp(&b.pid),
                 _ => std::cmp::Ordering::Equal,
             };
             if asc { ord } else { ord.reverse() }
@@ -897,6 +908,13 @@ impl App {
                 use std::fmt::Write;
 
                 if c.process_name.to_lowercase().contains(ft.as_str()) { return true; }
+
+                if let Some(m) = c.module_name.as_ref() {
+                    if m.to_lowercase().contains(ft.as_str()) { return true; }
+                }
+
+                buf.clear(); write!(buf, "{}", c.pid).unwrap();
+                if buf.contains(ft.as_str()) { return true; }
 
                 buf.clear(); write!(buf, "{}", c.local_addr).unwrap();
                 if buf.contains(ft.as_str()) { return true; }
@@ -1255,10 +1273,11 @@ impl App {
             // Sort keys mapped to displayed column order:
             // 1=Process, 2=Remote Host, 3=Service, 4=State, 5=Local
             KeyCode::Char('1') => self.toggle_sort(6),
-            KeyCode::Char('2') => self.toggle_sort(3),
-            KeyCode::Char('3') => self.toggle_sort(4),
-            KeyCode::Char('4') => self.toggle_sort(5),
-            KeyCode::Char('5') => self.toggle_sort(2),
+            KeyCode::Char('2') => self.toggle_sort(7),
+            KeyCode::Char('3') => self.toggle_sort(3),
+            KeyCode::Char('4') => self.toggle_sort(4),
+            KeyCode::Char('5') => self.toggle_sort(5),
+            KeyCode::Char('6') => self.toggle_sort(2),
             // Block selected connection's process via firewall
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 let filtered = self.filtered_connections();
@@ -1924,16 +1943,17 @@ impl App {
     fn handle_header_click(&mut self, x: u16, frame_w: u16) {
         match self.bottom_tab {
             BottomTab::Connections => {
-                // Columns: Process(20), Remote Host(Min22), Geo(7), Service(14), State(14), Local(7)
-                let col = column_from_x(x, &[20, 0, 7, 14, 14, 7], frame_w);
+                // Columns: Process(20), PID(7), Remote Host(Min22), Geo(7), Service(14), State(14), Local(7)
+                let col = column_from_x(x, &[20, 7, 0, 7, 14, 14, 7], frame_w);
                 // Map display column to sort column index used by toggle_sort:
-                // 0→Process(6), 1→RemoteHost(3), 2→Geo(skip), 3→Service(4), 4→State(5), 5→Local(2)
+                // 0→Process(6), 1→PID(7), 2→RemoteHost(3), 3→Geo(skip), 4→Service(4), 5→State(5), 6→Local(2)
                 if let Some(sort_col) = match col {
                     Some(0) => Some(6), // Process
-                    Some(1) => Some(3), // Remote Host
-                    Some(3) => Some(4), // Service
-                    Some(4) => Some(5), // State
-                    Some(5) => Some(2), // Local port
+                    Some(1) => Some(7), // PID
+                    Some(2) => Some(3), // Remote Host
+                    Some(4) => Some(4), // Service
+                    Some(5) => Some(5), // State
+                    Some(6) => Some(2), // Local port
                     _ => None,          // Geo not sortable
                 } {
                     self.toggle_sort(sort_col);
