@@ -1,11 +1,11 @@
 [package]
 name = "psnet"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "A beautiful real-time TUI network monitor for Windows — 9 tabs, GeoIP, device discovery, firewall, topology & more"
 license = "MIT"
-repository = "https://github.com/marlocarlo/psnet"
-homepage = "https://github.com/marlocarlo/psnet"
+repository = "https://github.com/psmux/psnet"
+homepage = "https://github.com/psmux/psnet"
 readme = "README.md"
 keywords = ["network", "monitor", "tui", "windows", "terminal"]
 categories = ["command-line-utilities", "network-programming"]

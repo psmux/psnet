@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License">
   <a href="https://crates.io/crates/psnet"><img src="https://img.shields.io/crates/v/psnet?style=for-the-badge&logo=rust&logoColor=white&color=e6522c" alt="crates.io"></a>
   <a href="https://community.chocolatey.org/packages/psnet"><img src="https://img.shields.io/chocolatey/v/psnet?style=for-the-badge&logo=chocolatey&logoColor=white&color=80B5E3" alt="Chocolatey"></a>
-  <a href="https://github.com/microsoft/winget-pkgs/tree/master/manifests/m/marlocarlo/psnet"><img src="https://img.shields.io/badge/winget-marlocarlo.psnet-blue?style=for-the-badge&logo=windows&logoColor=white" alt="WinGet"></a>
+  <a href="https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/psmux/psnet"><img src="https://img.shields.io/badge/winget-psmux.psnet-blue?style=for-the-badge&logo=windows&logoColor=white" alt="WinGet"></a>
 </p>
 
 <h1 align="center">
@@ -57,9 +57,11 @@ Think **GlassWire + Wireshark + htop**, but for your terminal.
 - **DNS-resolved hostnames** — see `github.com` instead of `140.82.121.4`
 - **Service labels** — `HTTPS/TCP`, `DNS/UDP`, `SSH/TCP` instead of raw port numbers
 - **Color-coded by state** — ESTABLISHED green, SYN_SENT cyan, TIME_WAIT purple, CLOSE_WAIT orange
-- **Sortable columns** — Process, Remote Host, Service, State, Local Port
+- **PID column** — owning process ID for every socket, sortable at a glance
+- **Service name resolution** — svchost.exe connections show the real owning service (WpnService, DoSvc, Dnscache, ...) via `GetOwnerModuleFromTcpEntry`, highlighted in purple
+- **Sortable columns** — Process, PID, Remote Host, Service, State, Local Port
 - **Localhost filter** — hide `127.0.0.1` noise (toggle with `x`)
-- **Live filtering** — type to search by process, hostname, port, or service
+- **Live filtering** — type to search by process, service module, PID, hostname, port, or service
 - **Detail popup** — press Enter for full connection details with GeoIP, bandwidth, and timing
 
 ### 🖥️ Servers (Listening Ports)
@@ -139,18 +141,18 @@ psnet
 ### Via WinGet
 
 ```powershell
-winget install marlocarlo.psnet
+winget install psmux.psnet
 psnet
 ```
 
 ### Download Binary
 
-Grab the latest `psnet.exe` from [GitHub Releases](https://github.com/marlocarlo/psnet/releases/latest) — no installation needed. Place it in your PATH and run.
+Grab the latest `psnet.exe` from [GitHub Releases](https://github.com/psmux/psnet/releases/latest) — no installation needed. Place it in your PATH and run.
 
 ### From Source
 
 ```powershell
-git clone https://github.com/marlocarlo/psnet.git
+git clone https://github.com/psmux/psnet.git
 cd psnet
 cargo build --release
 .\target\release\psnet.exe

@@ -4,8 +4,8 @@
     <id>psnet</id>
     <version>$version$</version>
     <title>PSNET — Real-Time TUI Network Monitor</title>
-    <authors>marlocarlo</authors>
-    <owners>marlocarlo</owners>
+    <authors>psmux</authors>
+    <owners>psmux</owners>
     <projectUrl>$repoUrl$</projectUrl>
     <licenseUrl>$repoUrl$/blob/master/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>

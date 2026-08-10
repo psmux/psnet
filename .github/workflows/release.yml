@@ -29,6 +29,7 @@ jobs:
   build:
     name: Build & Upload Release Assets
     runs-on: windows-latest
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
       sha256_exe: ${{ steps.checksum.outputs.sha256_exe }}
@@ -121,6 +122,7 @@ jobs:
     name: Publish to crates.io
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -157,8 +159,34 @@ jobs:
     name: Publish to Chocolatey
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Preflight checks
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          # Fail fast with a clear message instead of a cryptic push error
+          if ([string]::IsNullOrWhiteSpace($env:CHOCO_API_KEY)) {
+            Write-Error "CHOCO_API_KEY secret is missing or empty. Set it in repo Settings > Secrets."
+            exit 1
+          }
+          # Idempotency: if this version is already on Chocolatey (e.g. re-run
+          # of a partially failed release), skip the push instead of erroring.
+          $version = "${{ needs.build.outputs.version }}"
+          try {
+            $resp = Invoke-WebRequest -UseBasicParsing -Method Head `
+              -Uri "https://community.chocolatey.org/api/v2/Packages(Id='psnet',Version='$version')" `
+              -TimeoutSec 30
+            if ($resp.StatusCode -eq 200) {
+              Write-Host "psnet $version already exists on Chocolatey. Skipping push."
+              "SKIP_PUSH=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          } catch {
+            Write-Host "Version $version not yet on Chocolatey. Proceeding with push."
+          }
 
       - name: Prepare Chocolatey package
         shell: pwsh
@@ -216,9 +244,19 @@ jobs:
 
       - name: Push to Chocolatey
         shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
         run: |
+          if ($env:SKIP_PUSH -eq "true") {
+            Write-Host "Skipping push (version already published)."
+            exit 0
+          }
           $nupkg = (Get-ChildItem -Filter "psnet.*.nupkg" | Select-Object -First 1).FullName
-          choco push $nupkg --source https://push.chocolatey.org/ --api-key ${{ secrets.CHOCO_API_KEY }}
+          choco push $nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "choco push failed with exit code $LASTEXITCODE. Common causes: expired/revoked API key, package stuck in moderation, or malformed nuspec. Check the choco output above for the server response."
+            exit 1
+          }
 
   # ──────────────────────────────────────────────────────────────────────────
   # 4. Publish to WinGet (Windows Package Manager)
@@ -227,13 +265,36 @@ jobs:
     name: Publish to WinGet
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Preflight token validation
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: |
+          # An empty or expired token makes wingetcreate fall back to
+          # interactive device-flow auth, which hangs forever in CI (this is
+          # exactly what burned 6 hours on the v1.0.0 release). Validate the
+          # token against the GitHub API up front and fail in seconds instead.
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
+            Write-Error "WINGET_GITHUB_TOKEN secret is missing or empty. Set it in repo Settings > Secrets."
+            exit 1
+          }
+          try {
+            $resp = Invoke-RestMethod -Uri "https://api.github.com/user" -TimeoutSec 30 `
+              -Headers @{ Authorization = "token $env:WINGET_TOKEN"; "User-Agent" = "psnet-release" }
+            Write-Host "Token valid. Authenticated as: $($resp.login)"
+          } catch {
+            Write-Error "WINGET_GITHUB_TOKEN is invalid or expired (GitHub API rejected it). Rotate the PAT (public_repo scope) in repo Settings > Secrets. Error: $($_.Exception.Message)"
+            exit 1
+          }
 
       - name: Download wingetcreate
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe -TimeoutSec 120
           Write-Host "wingetcreate downloaded"
 
       - name: Submit manifest to winget-pkgs
@@ -250,23 +311,21 @@ jobs:
           Write-Host "Installer  : $exeUrl"
           Write-Host "SHA256     : $sha256"
 
-          # Try updating existing manifest (works after first submission is merged)
+          # Try updating existing manifest first (works once a submission has
+          # been merged into winget-pkgs). Invoke directly so output streams to
+          # the log; never Start-Process -Wait, which hid the interactive hang.
           Write-Host "--- Attempting manifest update via wingetcreate ---"
-          $proc = Start-Process -FilePath .\wingetcreate.exe -ArgumentList @(
-            "update",
-            "marlocarlo.psnet",
-            "--version", $version,
-            "--urls", $exeUrl,
-            "--token", $env:WINGET_TOKEN,
-            "--submit"
-          ) -NoNewWindow -Wait -PassThru
-
-          if ($proc.ExitCode -eq 0) {
+          & .\wingetcreate.exe update psmux.psnet `
+            --version $version `
+            --urls $exeUrl `
+            --token $env:WINGET_TOKEN `
+            --submit
+          if ($LASTEXITCODE -eq 0) {
             Write-Host "WinGet manifest PR submitted successfully via update."
             exit 0
           }
 
-          Write-Host "Update failed (exit $($proc.ExitCode)). Falling back to manual manifest + submit..."
+          Write-Host "Update failed (exit $LASTEXITCODE). Expected on first submission (package not yet in winget-pkgs). Falling back to manual manifest + submit..."
 
           # Fallback: create manifest YAMLs by hand and use 'submit'
           $manifestDir = "winget-manifests"
@@ -275,17 +334,17 @@ jobs:
           # Version manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
-          PackageIdentifier: marlocarlo.psnet
+          PackageIdentifier: psmux.psnet
           PackageVersion: $version
           DefaultLocale: en-US
           ManifestType: version
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.yaml" -Encoding utf8NoBOM
 
           # Installer manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
-          PackageIdentifier: marlocarlo.psnet
+          PackageIdentifier: psmux.psnet
           PackageVersion: $version
           Platform:
           - Windows.Desktop
@@ -299,20 +358,20 @@ jobs:
             - psnet
           ManifestType: installer
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.installer.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.installer.yaml" -Encoding utf8NoBOM
 
           # Default locale manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
-          PackageIdentifier: marlocarlo.psnet
+          PackageIdentifier: psmux.psnet
           PackageVersion: $version
           PackageLocale: en-US
-          Publisher: marlocarlo
-          PublisherUrl: https://github.com/marlocarlo
+          Publisher: psmux
+          PublisherUrl: https://github.com/psmux
           PackageName: psnet
-          PackageUrl: https://github.com/marlocarlo/psnet
+          PackageUrl: https://github.com/${{ github.repository }}
           License: MIT
-          LicenseUrl: https://github.com/marlocarlo/psnet/blob/master/LICENSE
+          LicenseUrl: https://github.com/${{ github.repository }}/blob/master/LICENSE
           ShortDescription: A beautiful real-time TUI network monitor for Windows — 9 tabs, GeoIP, device discovery, firewall, topology
           Tags:
           - cli
@@ -324,17 +383,13 @@ jobs:
           - windows
           ManifestType: defaultLocale
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.locale.en-US.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.locale.en-US.yaml" -Encoding utf8NoBOM
 
           Write-Host "--- Submitting manifests via wingetcreate submit ---"
-          $proc2 = Start-Process -FilePath .\wingetcreate.exe -ArgumentList @(
-            "submit",
-            $manifestDir,
-            "--token", $env:WINGET_TOKEN
-          ) -NoNewWindow -Wait -PassThru
+          & .\wingetcreate.exe submit $manifestDir --token $env:WINGET_TOKEN
 
-          if ($proc2.ExitCode -ne 0) {
-            Write-Warning "WinGet submission failed (exit $($proc2.ExitCode))."
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "WinGet submission failed (exit $LASTEXITCODE)."
             Write-Host "You may need to submit manually: https://github.com/microsoft/winget-pkgs"
             exit 1
           }
