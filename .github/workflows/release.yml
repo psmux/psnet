@@ -30,6 +30,7 @@ jobs:
     name: Build & Upload Release Assets
     runs-on: windows-latest
     timeout-minutes: 30
+    environment: ${{ github.ref_type == 'tag' && 'windows-signing' || '' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       sha256_exe: ${{ steps.checksum.outputs.sha256_exe }}
@@ -62,12 +63,45 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
+      # Code sign Windows binaries on release tags.
+      - name: Log in to Certum SimplySign
+        id: certum
+        if: runner.os == 'Windows' && github.ref_type == 'tag'
+        uses: jay0lee/certum-cloud-code-sign@a3324503499c49090869856eeeecfe95fb613d87
+        with:
+          username: ${{ secrets.CERTUM_USERNAME }}
+          totp_secret: ${{ secrets.CERTUM_TOTP_SECRET }}
+          totp_algorithm: ${{ vars.CERTUM_TOTP_ALGORITHM || 'SHA-256' }}
+
+      - name: Sign binary
+        if: steps.certum.outcome == 'success'
+        shell: pwsh
+        run: |
+          & "${{ steps.certum.outputs.signtool-path }}" sign /sha1 ${{ steps.certum.outputs.cert-thumbprint }} /tr http://time.certum.pl /td SHA256 /fd SHA256 /d "psnet" target/release/psnet.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool could not sign psnet.exe" }
+
       - name: Prepare release artifacts
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
           Copy-Item target/release/psnet.exe psnet.exe
           Compress-Archive -Path psnet.exe -DestinationPath "psnet-${version}-x86_64-windows.zip"
+
+      - name: Verify signatures
+        if: runner.os == 'Windows' && github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $signtool = "${{ steps.certum.outputs.signtool-path }}"
+          if (-not $signtool) { Write-Host "::error::signtool is not available"; exit 1 }
+          Expand-Archive -Path "psnet-${{ steps.version.outputs.version }}-x86_64-windows.zip" -DestinationPath zipcheck -Force
+          $bad = 0
+          foreach ($f in @('psnet.exe', 'zipcheck/psnet.exe')) {
+            & $signtool verify /pa /q $f
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::not signed: $f"; $bad = 1 }
+            else { Write-Host "signed: $f" }
+          }
+          Remove-Item zipcheck -Recurse -Force
+          if ($bad) { exit 1 }
 
       - name: Compute checksums
         id: checksum
@@ -114,6 +148,10 @@ jobs:
             psnet.exe
             psnet-${{ steps.version.outputs.version }}-x86_64-windows.zip
             checksums.txt
+
+      - name: Log out of Certum SimplySign
+        if: always() && steps.certum.outcome != 'skipped' && steps.certum.outcome != ''
+        uses: jay0lee/certum-cloud-code-sign/teardown@a3324503499c49090869856eeeecfe95fb613d87
 
   # ──────────────────────────────────────────────────────────────────────────
   # 2. Publish to crates.io
