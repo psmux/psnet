@@ -4,7 +4,7 @@
     <id>psnet</id>
     <version>$version$</version>
     <title>PSNET — Real-Time TUI Network Monitor</title>
-    <authors>psmux</authors>
+    <authors>Godwin Sam Josh</authors>
     <owners>psmux</owners>
     <projectUrl>$repoUrl$</projectUrl>
     <licenseUrl>$repoUrl$/blob/master/LICENSE</licenseUrl>
@@ -14,7 +14,7 @@
     <bugTrackerUrl>$repoUrl$/issues</bugTrackerUrl>
     <packageSourceUrl>$repoUrl$/tree/main/choco</packageSourceUrl>
     <releaseNotes>$repoUrl$/releases</releaseNotes>
-    <copyright>Copyright (c) 2026 PSNET Contributors</copyright>
+    <copyright>Copyright (c) 2026 Godwin Sam Josh</copyright>
     <tags>network monitor tui terminal windows rust cli wireshark sniffer connections speed</tags>
     <summary>A beautiful real-time TUI network monitor for Windows — 9 tabs, GeoIP, device discovery, firewall, topology</summary>
     <description><![CDATA[## PSNET — See your network. Understand your network.
