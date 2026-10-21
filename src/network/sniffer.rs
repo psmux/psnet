@@ -207,8 +207,15 @@ impl Drop for PacketSniffer {
 /// `parse_packet` expects, and independent of whether the interface is
 /// Ethernet, PPP or a tunnel.
 ///
-/// Unlike the Windows path this is not bound to one address, so it sees traffic
-/// on every interface; `local_ip` is still used to label packet direction.
+/// Like the Windows path, which binds SIO_RCVALL to the uplink address, the
+/// socket is bound to the uplink interface. Left unbound it would also see
+/// loopback, where every packet is delivered twice (once outgoing, once to
+/// the host). Direction comes from the kernel's `sll_pkttype` rather than
+/// comparing addresses, so traffic from secondary addresses is labelled too.
+///
+/// The socket listens for ETH_P_ALL and filters to IPv4 itself: the kernel
+/// hands transmitted packets only to ETH_P_ALL taps, so a socket opened for
+/// ETH_P_IP would never see outbound traffic.
 #[cfg(not(windows))]
 fn sniffer_thread(
     snippets: Arc<Mutex<VecDeque<PacketSnippet>>>,
@@ -219,8 +226,22 @@ fn sniffer_thread(
 ) {
     const AF_PACKET: i32 = 17;
     const SOCK_DGRAM: i32 = 2;
+    const ETH_P_ALL: u16 = 0x0003;
     const ETH_P_IP: u16 = 0x0800;
+    const PACKET_OUTGOING: u8 = 4;
     const POLLIN: i16 = 0x001;
+
+    /// struct sockaddr_ll
+    #[repr(C)]
+    struct SockAddrLl {
+        sll_family: u16,
+        sll_protocol: u16,
+        sll_ifindex: i32,
+        sll_hatype: u16,
+        sll_pkttype: u8,
+        sll_halen: u8,
+        sll_addr: [u8; 8],
+    }
 
     /// struct pollfd — same layout on every Linux ABI, which is why we poll for
     /// readability instead of setting SO_RCVTIMEO (whose timeval layout differs
@@ -234,27 +255,70 @@ fn sniffer_thread(
 
     extern "C" {
         fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
-        fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
+        // Same signature as the mDNS socket's `bind` in hostnames.rs.
+        fn bind(fd: i32, addr: *const u8, len: u32) -> i32;
+        fn recvfrom(
+            fd: i32,
+            buf: *mut u8,
+            len: usize,
+            flags: i32,
+            addr: *mut SockAddrLl,
+            addrlen: *mut u32,
+        ) -> isize;
         fn close(fd: i32) -> i32;
         fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
+        fn if_nametoindex(name: *const std::ffi::c_char) -> u32;
     }
 
-    let local_ip = match crate::network::uplink::uplink_ipv4().or_else(get_local_ipv4) {
-        Some(ip) => ip,
+    let (iface, local_ip) = match capture_interface() {
+        Some(target) => target,
         None => {
             set_error(&error_msg, "Could not determine local IP");
             active.store(false, Ordering::Relaxed);
             return;
         }
     };
+    let ifindex = std::ffi::CString::new(iface.as_str())
+        .map(|name| unsafe { if_nametoindex(name.as_ptr()) })
+        .unwrap_or(0);
+    if ifindex == 0 {
+        set_error(&error_msg, &format!("Interface {} has no index", iface));
+        active.store(false, Ordering::Relaxed);
+        return;
+    }
 
     // The protocol field of an AF_PACKET socket is a big-endian ethertype.
-    let sock = unsafe { socket(AF_PACKET, SOCK_DGRAM, (ETH_P_IP.to_be() as i32) & 0xFFFF) };
+    let sock = unsafe { socket(AF_PACKET, SOCK_DGRAM, (ETH_P_ALL.to_be() as i32) & 0xFFFF) };
     if sock < 0 {
         set_error(
             &error_msg,
             "Packet socket creation failed (requires root or CAP_NET_RAW)",
         );
+        active.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    let bind_addr = SockAddrLl {
+        sll_family: AF_PACKET as u16,
+        sll_protocol: ETH_P_ALL.to_be(),
+        sll_ifindex: ifindex as i32,
+        sll_hatype: 0,
+        sll_pkttype: 0,
+        sll_halen: 0,
+        sll_addr: [0; 8],
+    };
+    let bound = unsafe {
+        bind(
+            sock,
+            &bind_addr as *const SockAddrLl as *const u8,
+            std::mem::size_of::<SockAddrLl>() as u32,
+        )
+    };
+    if bound != 0 {
+        set_error(&error_msg, &format!("Could not bind to {}", iface));
+        unsafe {
+            close(sock);
+        }
         active.store(false, Ordering::Relaxed);
         return;
     }
@@ -281,13 +345,25 @@ fn sniffer_thread(
             continue; // timeout — re-check `active`
         }
 
-        let len = unsafe { recv(sock, buf.as_mut_ptr(), buf.len(), 0) };
+        let mut from: SockAddrLl = unsafe { std::mem::zeroed() };
+        let mut from_len = std::mem::size_of::<SockAddrLl>() as u32;
+        let len = unsafe {
+            recvfrom(sock, buf.as_mut_ptr(), buf.len(), 0, &mut from, &mut from_len)
+        };
         if len <= 0 || !active.load(Ordering::Relaxed) {
             break;
         }
+        if from.sll_protocol != ETH_P_IP.to_be() {
+            continue; // ARP, IPv6, ...
+        }
         let pkt = &buf[..len as usize];
 
-        if let Some(snippet) = parse_packet(pkt, local_ip) {
+        if let Some(mut snippet) = parse_packet(pkt, local_ip) {
+            snippet.direction = if from.sll_pkttype == PACKET_OUTGOING {
+                PacketDirection::Outbound
+            } else {
+                PacketDirection::Inbound
+            };
             if let Ok(mut lock) = snippets.lock() {
                 lock.push_back(snippet);
                 total_added.fetch_add(1, Ordering::Relaxed);
@@ -304,12 +380,13 @@ fn sniffer_thread(
     active.store(false, Ordering::Relaxed);
 }
 
-/// Local IPv4 as a network-order u32, matching the Windows helper's shape.
+/// The interface to capture on, with its IPv4 as a network-order u32 (the
+/// Windows helper's shape).
 ///
-/// Prefers the interface holding the default route, falling back to any
-/// non-loopback address.
+/// Prefers the interface holding the default route, falling back to the first
+/// one with a non-loopback address.
 #[cfg(not(windows))]
-fn get_local_ipv4() -> Option<u32> {
+fn capture_interface() -> Option<(String, u32)> {
     use crate::network::linux;
     use std::net::IpAddr;
 
@@ -321,10 +398,11 @@ fn get_local_ipv4() -> Option<u32> {
         if v4.is_loopback() || v4.is_unspecified() {
             continue;
         }
+        let ip = u32::from_ne_bytes(v4.octets());
         if uplink_iface.as_deref() == Some(ifa.name.as_str()) {
-            return Some(u32::from_ne_bytes(v4.octets()));
+            return Some((ifa.name, ip));
         }
-        fallback.get_or_insert(u32::from_ne_bytes(v4.octets()));
+        fallback.get_or_insert((ifa.name, ip));
     }
     fallback
 }

@@ -103,11 +103,6 @@ pub fn uplink_ipv4() -> Option<u32> {
     None
 }
 
-#[cfg(not(windows))]
-pub fn uplink_ipv4() -> Option<u32> {
-    None
-}
-
 /// Fetch the adapter table via GetAdaptersAddresses (with gateway info).
 /// Returns the raw buffer holding the IP_ADAPTER_ADDRESSES_LH linked list,
 /// or None when the query fails.
