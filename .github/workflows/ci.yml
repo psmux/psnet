@@ -1,0 +1,84 @@
+# ============================================================================
+# PSNET — Continuous Integration
+# ============================================================================
+# Type-checks and tests every push to master and every pull request, on both
+# supported platforms. Release builds and publishing live in release.yml.
+# ============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. cargo check + cargo test on Windows and Linux
+  # ──────────────────────────────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check
+        run: cargo check --all-targets --locked
+
+      - name: cargo test
+        run: cargo test --locked
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. cargo check for aarch64 Linux (routers, ARM boards)
+  # ──────────────────────────────────────────────────────────────────────────
+  check-aarch64:
+    name: Check (aarch64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-aarch64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check
+        run: cargo check --all-targets --locked --target aarch64-unknown-linux-gnu
