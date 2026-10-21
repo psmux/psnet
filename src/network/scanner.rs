@@ -83,17 +83,26 @@ struct IP_ADDR_STRING {
     Context: u32,
 }
 
-/// Get the local IPv4 address and subnet mask of the primary adapter.
+/// Get the local IPv4 address, subnet mask and gateway of the LAN to scan.
 ///
-/// Picks the first usable adapter, preferring one that owns a default route,
-/// so a router with several bridged interfaces still scans the WAN-facing one
-/// consistently with the Windows behaviour.
+/// The Windows code takes the adapter holding the default route, which on a PC
+/// is the LAN. On a router it is the WAN instead: often a point-to-point /32
+/// (PPPoE) with nothing to sweep, or the ISP's network, while the devices sit
+/// behind br-lan. So each address is ranked by, in order: whether its subnet
+/// has hosts at all, how many neighbours the kernel already has on that
+/// interface, whether it is a private address, and whether it holds the
+/// default route. A PC still gets its default-route LAN; a router gets br-lan.
 #[cfg(not(windows))]
 fn get_local_subnet() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
     use crate::network::linux;
 
     let default = linux::default_route();
-    let mut best: Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> = None;
+    let mut neighbours: HashMap<String, usize> = HashMap::new();
+    for entry in linux::arp_table() {
+        *neighbours.entry(entry.iface).or_default() += 1;
+    }
+
+    let mut best: Option<((bool, usize, bool, bool), (Ipv4Addr, Ipv4Addr, Ipv4Addr))> = None;
 
     for ifa in linux::ifaddrs() {
         let (ip, mask) = match (ifa.addr, ifa.netmask) {
@@ -110,12 +119,18 @@ fn get_local_subnet() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
             .map(|(gw, _)| *gw)
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-        if best.is_none() || !gw.is_unspecified() {
-            best = Some((ip, mask, gw));
+        let rank = (
+            u32::from(mask).leading_ones() < 31,
+            neighbours.get(&ifa.name).copied().unwrap_or(0),
+            ip.is_private(),
+            !gw.is_unspecified(),
+        );
+        if best.as_ref().map_or(true, |(best_rank, _)| rank > *best_rank) {
+            best = Some((rank, (ip, mask, gw)));
         }
     }
 
-    best
+    best.map(|(_, subnet)| subnet)
 }
 
 /// Get the local IPv4 address and subnet mask of the primary adapter.
