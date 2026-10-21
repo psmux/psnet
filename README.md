@@ -164,6 +164,17 @@ cargo build --release
 - **Rust 1.70+** for building from source
 - **Administrator privileges** — optional, enables Wire packet preview and raw socket capture
 
+### Linux
+
+PSNET also builds and runs on Linux, reading the same data from procfs and sysfs instead of Win32:
+
+```sh
+cargo build --release
+sudo ./target/release/psnet
+```
+
+Without root (or `CAP_NET_RAW`) everything runs except packet capture, and sockets owned by other users' processes can't be attributed to a process. Some Windows features have no Linux counterpart and stay empty: the DNS resolver cache, svchost service names, the Windows Firewall controls in the Firewall tab, and Hyper-V, Bluetooth and hotspot discovery.
+
 ---
 
 ## Tabs
