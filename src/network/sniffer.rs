@@ -1,10 +1,10 @@
-//! Raw socket packet sniffer for Windows.
+//! Raw socket packet sniffer.
 //!
-//! Captures IP packets using a raw socket with SIO_RCVALL,
-//! extracts printable ASCII snippets from TCP/UDP payloads,
-//! and stores them in a thread-safe ring buffer for the UI.
+//! Captures IP packets — via a raw socket with SIO_RCVALL on Windows, and an
+//! AF_PACKET socket on Linux — extracts printable ASCII snippets from TCP/UDP
+//! payloads, and stores them in a thread-safe ring buffer for the UI.
 //!
-//! Requires Administrator privileges to function.
+//! Requires Administrator privileges (Windows) or CAP_NET_RAW/root (Linux).
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
@@ -18,14 +18,22 @@ use crate::types::{ConnProto, PacketDirection, PacketSnippet};
 
 // ─── Winsock2 FFI ────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 const AF_INET: i32 = 2;
+#[cfg(windows)]
 const SOCK_RAW: i32 = 3;
+#[cfg(windows)]
 const IPPROTO_IP: i32 = 0;
+#[cfg(windows)]
 const SIO_RCVALL: u32 = 0x98000001;
+#[cfg(windows)]
 const RCVALL_ON: u32 = 1;
+#[cfg(windows)]
 const INVALID_SOCKET: usize = !0;
+#[cfg(windows)]
 const SOCKET_ERROR: i32 = -1;
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct WSADATA {
@@ -38,6 +46,7 @@ struct WSADATA {
     lpVendorInfo: *mut u8,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case)]
 struct SOCKADDR_IN {
@@ -47,6 +56,7 @@ struct SOCKADDR_IN {
     sin_zero: [u8; 8],
 }
 
+#[cfg(windows)]
 #[link(name = "ws2_32")]
 extern "system" {
     fn WSAStartup(wVersionRequested: u16, lpWSAData: *mut WSADATA) -> i32;
@@ -76,6 +86,7 @@ extern "system" {
     fn freeaddrinfo(pAddrInfo: *mut ADDRINFO);
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case)]
 struct ADDRINFO {
@@ -189,6 +200,136 @@ impl Drop for PacketSniffer {
 
 // ─── Background thread ──────────────────────────────────────────────────────
 
+/// Linux capture loop, using AF_PACKET.
+///
+/// SOCK_DGRAM (not SOCK_RAW) is deliberate: a "cooked" packet socket strips the
+/// link-layer header, so what we receive begins at the IP header — exactly what
+/// `parse_packet` expects, and independent of whether the interface is
+/// Ethernet, PPP or a tunnel.
+///
+/// Unlike the Windows path this is not bound to one address, so it sees traffic
+/// on every interface; `local_ip` is still used to label packet direction.
+#[cfg(not(windows))]
+fn sniffer_thread(
+    snippets: Arc<Mutex<VecDeque<PacketSnippet>>>,
+    active: Arc<AtomicBool>,
+    error_msg: Arc<Mutex<Option<String>>>,
+    max_snippets: usize,
+    total_added: Arc<AtomicUsize>,
+) {
+    const AF_PACKET: i32 = 17;
+    const SOCK_DGRAM: i32 = 2;
+    const ETH_P_IP: u16 = 0x0800;
+    const POLLIN: i16 = 0x001;
+
+    /// struct pollfd — same layout on every Linux ABI, which is why we poll for
+    /// readability instead of setting SO_RCVTIMEO (whose timeval layout differs
+    /// between 32- and 64-bit targets).
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    extern "C" {
+        fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+        fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
+        fn close(fd: i32) -> i32;
+        fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
+    }
+
+    let local_ip = match crate::network::uplink::uplink_ipv4().or_else(get_local_ipv4) {
+        Some(ip) => ip,
+        None => {
+            set_error(&error_msg, "Could not determine local IP");
+            active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    // The protocol field of an AF_PACKET socket is a big-endian ethertype.
+    let sock = unsafe { socket(AF_PACKET, SOCK_DGRAM, (ETH_P_IP.to_be() as i32) & 0xFFFF) };
+    if sock < 0 {
+        set_error(
+            &error_msg,
+            "Packet socket creation failed (requires root or CAP_NET_RAW)",
+        );
+        active.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    // Clear any previous error — we're live
+    if let Ok(mut e) = error_msg.lock() {
+        *e = None;
+    }
+
+    let mut buf = vec![0u8; 65535];
+    while active.load(Ordering::Relaxed) {
+        // Poll first so a quiet link still lets us observe `active` going false
+        // and shut the thread down promptly, rather than blocking in recv.
+        let mut pfd = PollFd {
+            fd: sock,
+            events: POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { poll(&mut pfd, 1, 500) };
+        if ready < 0 {
+            break;
+        }
+        if ready == 0 {
+            continue; // timeout — re-check `active`
+        }
+
+        let len = unsafe { recv(sock, buf.as_mut_ptr(), buf.len(), 0) };
+        if len <= 0 || !active.load(Ordering::Relaxed) {
+            break;
+        }
+        let pkt = &buf[..len as usize];
+
+        if let Some(snippet) = parse_packet(pkt, local_ip) {
+            if let Ok(mut lock) = snippets.lock() {
+                lock.push_back(snippet);
+                total_added.fetch_add(1, Ordering::Relaxed);
+                while lock.len() > max_snippets {
+                    lock.pop_front();
+                }
+            }
+        }
+    }
+
+    unsafe {
+        close(sock);
+    }
+    active.store(false, Ordering::Relaxed);
+}
+
+/// Local IPv4 as a network-order u32, matching the Windows helper's shape.
+///
+/// Prefers the interface holding the default route, falling back to any
+/// non-loopback address.
+#[cfg(not(windows))]
+fn get_local_ipv4() -> Option<u32> {
+    use crate::network::linux;
+    use std::net::IpAddr;
+
+    let uplink_iface = linux::default_route().map(|(_, iface)| iface);
+
+    let mut fallback = None;
+    for ifa in linux::ifaddrs() {
+        let IpAddr::V4(v4) = ifa.addr else { continue };
+        if v4.is_loopback() || v4.is_unspecified() {
+            continue;
+        }
+        if uplink_iface.as_deref() == Some(ifa.name.as_str()) {
+            return Some(u32::from_ne_bytes(v4.octets()));
+        }
+        fallback.get_or_insert(u32::from_ne_bytes(v4.octets()));
+    }
+    fallback
+}
+
+#[cfg(windows)]
 fn sniffer_thread(
     snippets: Arc<Mutex<VecDeque<PacketSnippet>>>,
     active: Arc<AtomicBool>,
@@ -535,6 +676,7 @@ fn set_error(error_msg: &Arc<Mutex<Option<String>>>, msg: &str) {
 }
 
 /// Get the local IPv4 address (non-loopback) as a raw u32 in network byte order.
+#[cfg(windows)]
 unsafe fn get_local_ipv4() -> Option<u32> {
     let mut hostname = [0u8; 256];
     if gethostname(hostname.as_mut_ptr(), 256) != 0 {

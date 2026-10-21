@@ -1,12 +1,16 @@
-//! Network adapter enumeration using Win32 GetAdaptersInfo.
+//! Network adapter enumeration.
 //!
 //! Discovers ALL network interfaces: Ethernet, WiFi, VPN tunnels,
 //! Docker vEthernet, WSL vEthernet, Hyper-V switches, etc.
+//!
+//! Backed by Win32 GetAdaptersInfo on Windows and by getifaddrs(3) plus
+//! /sys/class/net and /proc/net/route on Linux.
 
 use std::net::Ipv4Addr;
 
 // ─── Win32 FFI ───────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct IP_ADAPTER_INFO {
@@ -30,6 +34,7 @@ struct IP_ADAPTER_INFO {
     LeaseExpires: i64,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct IP_ADDR_STRING {
@@ -39,12 +44,15 @@ struct IP_ADDR_STRING {
     Context: u32,
 }
 
+#[cfg(windows)]
 #[link(name = "iphlpapi")]
 extern "system" {
     fn GetAdaptersInfo(pAdapterInfo: *mut u8, pOutBufLen: *mut u32) -> u32;
 }
 
+#[cfg(windows)]
 const ERROR_SUCCESS: u32 = 0;
+#[cfg(windows)]
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 
 // ─── Adapter type constants ──────────────────────────────────────────────────
@@ -77,6 +85,7 @@ pub struct AdapterInfo {
 
 /// Enumerate all network adapters with valid IPv4 addresses.
 /// Returns every adapter, including virtual ones (Docker, WSL, VPN, Hyper-V).
+#[cfg(windows)]
 pub fn enumerate_all() -> Vec<AdapterInfo> {
     let mut result = Vec::new();
 
@@ -124,7 +133,92 @@ pub fn enumerate_all() -> Vec<AdapterInfo> {
     result
 }
 
+#[cfg(windows)]
 fn cstr_from_bytes(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).to_string()
+}
+
+// ─── Linux implementation ────────────────────────────────────────────────────
+
+/// Map a Linux ARPHRD_* hardware type (/sys/class/net/<if>/type) onto the MIB
+/// IF_TYPE_* value the categorizer expects.
+///
+/// ARPHRD_NONE is what tun/tap and WireGuard devices report, so it maps to
+/// IF_TYPE_TUNNEL — that is what makes wg0/tun0 categorize as a VPN even
+/// though their names never match the description keywords.
+#[cfg(not(windows))]
+fn arphrd_to_if_type(arphrd: u32, is_wireless: bool) -> u32 {
+    const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
+    const IF_TYPE_IEEE80211: u32 = 71;
+
+    if is_wireless {
+        return IF_TYPE_IEEE80211;
+    }
+    match arphrd {
+        256 => IF_TYPE_SLIP,     // ARPHRD_SLIP
+        512 => IF_TYPE_PPP,      // ARPHRD_PPP
+        772 => IF_TYPE_LOOPBACK, // ARPHRD_LOOPBACK
+        // ARPHRD_NONE / ARPHRD_VOID — tun, wg, and other point-to-point virtuals
+        65534 | 65535 => IF_TYPE_TUNNEL,
+        801..=803 => IF_TYPE_IEEE80211, // ARPHRD_IEEE80211*
+        _ => IF_TYPE_ETHERNET_CSMACD,
+    }
+}
+
+/// Enumerate all network adapters with valid IPv4 addresses.
+/// Returns every adapter, including virtual ones (bridges, Docker, WireGuard).
+///
+/// The Windows adapter "description" is a vendor string; sysfs has no direct
+/// equivalent, so we synthesise "<ifname> (<driver>)". That keeps the
+/// description-keyword categorization working, since on Linux it is the
+/// interface name that carries the meaning (docker0, tailscale0, br-lan).
+#[cfg(not(windows))]
+pub fn enumerate_all() -> Vec<AdapterInfo> {
+    use crate::network::linux;
+    use std::net::IpAddr;
+
+    // Per-interface default gateways from the routing table.
+    let mut gateways: std::collections::HashMap<String, Ipv4Addr> =
+        std::collections::HashMap::new();
+    for (dest, _mask, gw, iface) in linux::routes() {
+        if dest.is_unspecified() && !gw.is_unspecified() {
+            gateways.entry(iface).or_insert(gw);
+        }
+    }
+
+    let mut result = Vec::new();
+    for ifa in linux::ifaddrs() {
+        // Only IPv4 addresses, matching the Windows implementation.
+        let (ip, mask) = match (ifa.addr, ifa.netmask) {
+            (IpAddr::V4(ip), Some(IpAddr::V4(mask))) => (ip, mask),
+            _ => continue,
+        };
+        if ip.is_unspecified() || mask == Ipv4Addr::UNSPECIFIED {
+            continue;
+        }
+
+        let name = ifa.name;
+        let arphrd = linux::sysfs_attr(&name, "type")
+            .and_then(|t| t.parse::<u32>().ok())
+            .unwrap_or(1);
+        let is_wireless =
+            std::path::Path::new(&format!("/sys/class/net/{}/wireless", name)).exists();
+
+        let description = match linux::interface_driver(&name) {
+            Some(driver) => format!("{} ({})", name, driver),
+            None => name.clone(),
+        };
+
+        result.push(AdapterInfo {
+            gateway: gateways.get(&name).copied(),
+            if_type: arphrd_to_if_type(arphrd, is_wireless),
+            name,
+            description,
+            ip,
+            mask,
+        });
+    }
+
+    result
 }

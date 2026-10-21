@@ -398,6 +398,7 @@ fn resolve_mdns_browse(timeout_ms: u64) -> Vec<(Ipv4Addr, String)> {
 
 /// Try to bind a UDP socket to port 5353 with SO_REUSEADDR.
 /// Returns None if binding fails (port in use without reuse support).
+#[cfg(windows)]
 fn bind_mdns_socket() -> Option<Option<UdpSocket>> {
     use std::os::windows::io::{FromRawSocket, RawSocket};
 
@@ -450,6 +451,7 @@ fn bind_mdns_socket() -> Option<Option<UdpSocket>> {
     }
 }
 
+#[cfg(windows)]
 #[allow(clashing_extern_declarations)]
 #[link(name = "ws2_32")]
 extern "system" {
@@ -458,6 +460,83 @@ extern "system" {
     #[link_name = "bind"]
     fn winsock_bind(s: usize, name: *const u8, namelen: i32) -> i32;
     fn closesocket(s: usize) -> i32;
+}
+
+/// Linux equivalent of the Winsock path above: create a UDP socket, set
+/// SO_REUSEADDR *and* SO_REUSEPORT, then bind to 5353.
+///
+/// Both options matter here — a router typically already runs an mDNS
+/// responder (umdns/avahi) holding 5353, and on Linux joining an existing
+/// multicast bind needs SO_REUSEPORT, not just SO_REUSEADDR. Without it we
+/// silently fall back to an ephemeral port and miss responses sent to the
+/// standard port.
+#[cfg(not(windows))]
+fn bind_mdns_socket() -> Option<Option<UdpSocket>> {
+    use std::os::fd::FromRawFd;
+
+    const AF_INET: i32 = 2;
+    const SOCK_DGRAM: i32 = 2;
+    const IPPROTO_UDP: i32 = 17;
+    const SOL_SOCKET: i32 = 1;
+    const SO_REUSEADDR: i32 = 2;
+    const SO_REUSEPORT: i32 = 15;
+
+    #[repr(C)]
+    struct SockAddrIn {
+        sin_family: u16,
+        sin_port: u16,
+        sin_addr: u32,
+        sin_zero: [u8; 8],
+    }
+
+    extern "C" {
+        fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+        fn setsockopt(fd: i32, level: i32, name: i32, val: *const u8, len: u32) -> i32;
+        fn bind(fd: i32, addr: *const u8, len: u32) -> i32;
+        fn close(fd: i32) -> i32;
+    }
+
+    unsafe {
+        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if fd < 0 {
+            return Some(None);
+        }
+
+        let optval: i32 = 1;
+        for opt in [SO_REUSEADDR, SO_REUSEPORT] {
+            let ret = setsockopt(
+                fd,
+                SOL_SOCKET,
+                opt,
+                &optval as *const i32 as *const u8,
+                std::mem::size_of::<i32>() as u32,
+            );
+            // SO_REUSEPORT is absent on ancient kernels; SO_REUSEADDR alone
+            // still gets us a usable socket, so only a REUSEADDR failure is fatal.
+            if ret != 0 && opt == SO_REUSEADDR {
+                close(fd);
+                return Some(None);
+            }
+        }
+
+        let addr = SockAddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: 5353u16.to_be(),
+            sin_addr: 0, // INADDR_ANY
+            sin_zero: [0; 8],
+        };
+        let ret = bind(
+            fd,
+            &addr as *const SockAddrIn as *const u8,
+            std::mem::size_of::<SockAddrIn>() as u32,
+        );
+        if ret != 0 {
+            close(fd);
+            return Some(None);
+        }
+
+        Some(Some(UdpSocket::from_raw_fd(fd)))
+    }
 }
 
 // ─── Method 3: mDNS per-IP UNICAST reverse PTR ──────────────────────────────
@@ -503,9 +582,19 @@ fn mdns_unicast_ptr_query(ip: Ipv4Addr, timeout_ms: u64) -> Option<String> {
 
 // ─── Method 4: Windows DNS cache (DnsGetCacheDataTable) ──────────────────────
 
+/// Linux has no process-readable system-wide DNS cache to mine — resolution is
+/// either in-process (glibc has no shared cache) or inside a separate resolver
+/// such as dnsmasq, which exposes no lookup API. The other eleven discovery
+/// methods cover this ground, so this source is simply empty here.
+#[cfg(not(windows))]
+fn resolve_windows_dns_cache(_ips: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
+    Vec::new()
+}
+
 /// Read the Windows DNS resolver cache using the undocumented DnsGetCacheDataTable
 /// function from dnsapi.dll. This is instant and requires no network traffic.
 /// It finds hostnames that Windows has already resolved via any method.
+#[cfg(windows)]
 fn resolve_windows_dns_cache(ips: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
     let mut results = Vec::new();
 
@@ -572,6 +661,7 @@ fn resolve_windows_dns_cache(ips: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
 
 /// Read the Windows DNS cache using DnsGetCacheDataTable from dnsapi.dll.
 /// Returns Vec<(name, record_type)> or None if the API is unavailable.
+#[cfg(windows)]
 fn read_dns_cache() -> Option<Vec<(String, u16)>> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -646,6 +736,7 @@ fn read_dns_cache() -> Option<Vec<(String, u16)>> {
     }
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(lpLibFileName: *const u16) -> *mut std::ffi::c_void;

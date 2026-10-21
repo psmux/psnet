@@ -49,6 +49,8 @@ pub struct DockerNetwork {
 
 /// Create a Command with CREATE_NO_WINDOW on Windows.
 fn quiet_command(program: &str) -> Command {
+    // `mut` is only needed for the Windows-only creation_flags call below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     {

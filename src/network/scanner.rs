@@ -1,4 +1,7 @@
-//! LAN device scanner using ARP (SendARP from iphlpapi.dll).
+//! LAN device scanner using the OS neighbour table.
+//!
+//! Backed by iphlpapi (GetAdaptersInfo/GetIpNetTable) on Windows and by
+//! getifaddrs(3) plus /proc/net/{arp,route} on Linux.
 //!
 //! Scans the local subnet to discover devices, their MAC addresses,
 //! and tracks online/offline status over time. Runs scans on a background
@@ -24,6 +27,7 @@ pub const SCAN_PHASE_DNS: u8 = 2;
 
 // ─── Win32 FFI ───────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 #[link(name = "iphlpapi")]
 extern "system" {
     fn GetAdaptersInfo(
@@ -38,11 +42,14 @@ extern "system" {
     ) -> u32;
 }
 
+#[cfg(windows)]
 const ERROR_SUCCESS: u32 = 0;
+#[cfg(windows)]
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 
 // ─── Adapter info parsing (simplified) ──────────────────────────────────────
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct IP_ADAPTER_INFO {
@@ -66,6 +73,7 @@ struct IP_ADAPTER_INFO {
     LeaseExpires: i64,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct IP_ADDR_STRING {
@@ -76,6 +84,42 @@ struct IP_ADDR_STRING {
 }
 
 /// Get the local IPv4 address and subnet mask of the primary adapter.
+///
+/// Picks the first usable adapter, preferring one that owns a default route,
+/// so a router with several bridged interfaces still scans the WAN-facing one
+/// consistently with the Windows behaviour.
+#[cfg(not(windows))]
+fn get_local_subnet() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+    use crate::network::linux;
+
+    let default = linux::default_route();
+    let mut best: Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> = None;
+
+    for ifa in linux::ifaddrs() {
+        let (ip, mask) = match (ifa.addr, ifa.netmask) {
+            (IpAddr::V4(ip), Some(IpAddr::V4(mask))) => (ip, mask),
+            _ => continue,
+        };
+        if ip.is_loopback() || ip.is_unspecified() || mask == Ipv4Addr::UNSPECIFIED {
+            continue;
+        }
+
+        let gw = default
+            .as_ref()
+            .filter(|(_, iface)| *iface == ifa.name)
+            .map(|(gw, _)| *gw)
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+
+        if best.is_none() || !gw.is_unspecified() {
+            best = Some((ip, mask, gw));
+        }
+    }
+
+    best
+}
+
+/// Get the local IPv4 address and subnet mask of the primary adapter.
+#[cfg(windows)]
 fn get_local_subnet() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
     unsafe {
         let mut size: u32 = 0;
@@ -114,6 +158,7 @@ fn get_local_subnet() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
     }
 }
 
+#[cfg(windows)]
 fn cstr_from_bytes(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).to_string()
@@ -145,6 +190,7 @@ fn subnet_ips(ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<Ipv4Addr> {
 
 // ─── ARP cache instant read (GetIpNetTable — zero network traffic) ──────────
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case)]
 struct MIB_IPNETROW {
@@ -157,6 +203,40 @@ struct MIB_IPNETROW {
 
 /// Read the OS ARP cache instantly (no network traffic).
 /// Returns Vec of (ip, mac) for all reachable entries in the local subnet.
+///
+/// /proc/net/arp already excludes incomplete entries via the flags column
+/// (see `linux::arp_table`), which is the equivalent of skipping the
+/// invalid/other entry types in the Windows MIB table.
+#[cfg(not(windows))]
+fn arp_cache_read(local_ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<(Ipv4Addr, String)> {
+    use crate::network::linux;
+
+    let ip_u32 = u32::from(local_ip);
+    let mask_u32 = u32::from(mask);
+    let network = ip_u32 & mask_u32;
+    let broadcast = network | !mask_u32;
+
+    let mut results = Vec::new();
+    for entry in linux::arp_table() {
+        // Only include IPs in our subnet (not network/broadcast, not self)
+        let ip_val = u32::from(entry.ip);
+        if ip_val <= network || ip_val >= broadcast || entry.ip == local_ip {
+            continue;
+        }
+        // Match the Windows formatting so MAC strings compare and display
+        // identically across platforms.
+        let mac = entry.mac.to_uppercase();
+        if mac != "FF:FF:FF:FF:FF:FF" {
+            results.push((entry.ip, mac));
+        }
+    }
+
+    results
+}
+
+/// Read the OS ARP cache instantly (no network traffic).
+/// Returns Vec of (ip, mac) for all reachable entries in the local subnet.
+#[cfg(windows)]
 fn arp_cache_read(local_ip: Ipv4Addr, mask: Ipv4Addr) -> Vec<(Ipv4Addr, String)> {
     let mut results = Vec::new();
     let ip_u32 = u32::from(local_ip);

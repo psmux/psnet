@@ -20,6 +20,7 @@ use std::time::Duration;
 
 // ─── Win32 FFI ──────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 #[link(name = "iphlpapi")]
 extern "system" {
     fn SendARP(DestIP: u32, SrcIP: u32, pMacAddr: *mut u8, PhyAddrLen: *mut u32) -> u32;
@@ -38,6 +39,8 @@ extern "system" {
     ) -> u32;
 }
 
+/// sockaddr_in. The layout is identical on Windows and Linux (only the
+/// signedness of the family field differs, which does not affect the ABI).
 #[repr(C)]
 #[allow(non_snake_case)]
 struct SOCKADDR_IN {
@@ -47,6 +50,7 @@ struct SOCKADDR_IN {
     sin_zero: [u8; 8],
 }
 
+#[cfg(windows)]
 #[link(name = "ws2_32")]
 extern "system" {
     fn getnameinfo(
@@ -60,10 +64,30 @@ extern "system" {
     ) -> i32;
 }
 
+// getnameinfo is POSIX and lives in libc on Linux, so the reverse-DNS path
+// below is shared — only the linkage differs.
+#[cfg(not(windows))]
+extern "C" {
+    fn getnameinfo(
+        sa: *const SOCKADDR_IN,
+        salen: u32,
+        host: *mut u8,
+        hostlen: u32,
+        serv: *mut u8,
+        servlen: u32,
+        flags: i32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
 const INVALID_HANDLE_VALUE: isize = -1;
+#[cfg(windows)]
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
+#[cfg(windows)]
 const ERROR_SUCCESS: u32 = 0;
 const AF_INET: i16 = 2;
+/// NI_NAMEREQD — fail rather than return a numeric string. Same value on both
+/// platforms.
 const NI_NAMEREQD: i32 = 8;
 
 // ─── Result types ───────────────────────────────────────────────────────────
@@ -241,6 +265,49 @@ pub(crate) fn merge_hits(hits: Vec<ProbeHit>, local_ip: Ipv4Addr) -> Vec<MergedH
 // Method 1: ARP Scan (SendARP) — Layer 2
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// Linux has no SendARP equivalent — there is no API that resolves one address
+/// synchronously. The standard substitute is to provoke the kernel into doing
+/// it: send a datagram to each target so the stack must resolve its MAC, then
+/// read the neighbour table it just populated.
+///
+/// The UDP send targets a high, almost certainly closed port; we never look at
+/// a response, only at the ARP entry the attempt creates.
+#[cfg(not(windows))]
+pub(crate) fn arp_scan(targets: &[Ipv4Addr], local_ip: Ipv4Addr) -> Vec<ProbeHit> {
+    /// Unassigned high port — we want the ARP side-effect, not a reply.
+    const POKE_PORT: u16 = 9;
+    /// Time to let the kernel complete resolution before reading the table.
+    const SETTLE: Duration = Duration::from_millis(400);
+
+    let target_set: HashSet<Ipv4Addr> = targets.iter().copied().collect();
+
+    // A single socket is enough: these are unconnected sends, and the point is
+    // only to make the kernel resolve each destination.
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+        for &target in targets {
+            let _ = sock.send_to(b"", SocketAddrV4::new(target, POKE_PORT));
+        }
+    }
+
+    thread::sleep(SETTLE);
+
+    let mut hits = Vec::new();
+    for entry in crate::network::linux::arp_table() {
+        if entry.ip == local_ip || !target_set.contains(&entry.ip) {
+            continue;
+        }
+        hits.push(ProbeHit {
+            ip: entry.ip,
+            mac: Some(entry.mac.to_uppercase()),
+            hostname: None,
+            method: "ARP",
+        });
+    }
+
+    hits
+}
+
+#[cfg(windows)]
 pub(crate) fn arp_scan(targets: &[Ipv4Addr], local_ip: Ipv4Addr) -> Vec<ProbeHit> {
     let src = u32::from(local_ip).to_be();
     let hits: Mutex<Vec<ProbeHit>> = Mutex::new(Vec::new());
@@ -274,6 +341,7 @@ pub(crate) fn arp_scan(targets: &[Ipv4Addr], local_ip: Ipv4Addr) -> Vec<ProbeHit
 // Method 2: ARP Cache (GetIpNetTable) — zero traffic, reads OS table
 // ═════════════════════════════════════════════════════════════════════════════
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case)]
 struct MIB_IPNETROW {
@@ -284,6 +352,23 @@ struct MIB_IPNETROW {
     dwType: u32,
 }
 
+#[cfg(not(windows))]
+pub(crate) fn arp_cache_read(targets: &[Ipv4Addr]) -> Vec<ProbeHit> {
+    let target_set: HashSet<Ipv4Addr> = targets.iter().copied().collect();
+
+    crate::network::linux::arp_table()
+        .into_iter()
+        .filter(|e| target_set.contains(&e.ip))
+        .map(|e| ProbeHit {
+            ip: e.ip,
+            mac: Some(e.mac.to_uppercase()),
+            hostname: None,
+            method: "ARP-Cache",
+        })
+        .collect()
+}
+
+#[cfg(windows)]
 pub(crate) fn arp_cache_read(targets: &[Ipv4Addr]) -> Vec<ProbeHit> {
     let mut hits = Vec::new();
     let target_set: HashSet<Ipv4Addr> = targets.iter().copied().collect();
@@ -361,6 +446,133 @@ pub(crate) fn icmp_ping_sweep(targets: &[Ipv4Addr]) -> Vec<ProbeHit> {
     hits.into_inner().unwrap()
 }
 
+/// ICMP echo on Linux.
+///
+/// There is no IcmpSendEcho equivalent, so we build the echo request by hand.
+/// Two socket types can carry it:
+///
+///   SOCK_DGRAM/IPPROTO_ICMP — unprivileged "ping sockets", available when the
+///     caller's gid is inside net.ipv4.ping_group_range. The kernel owns the
+///     identifier field and rewrites it, so replies cannot be matched on id.
+///   SOCK_RAW/IPPROTO_ICMP   — needs root or CAP_NET_RAW, and delivers replies
+///     with the full IP header attached.
+///
+/// We try the unprivileged socket first and fall back to raw, so the probe
+/// works both as root (the normal case on OpenWrt) and as a plain user.
+#[cfg(not(windows))]
+pub(crate) fn icmp_ping_one(target: Ipv4Addr) -> bool {
+    use std::os::fd::FromRawFd;
+
+    const AF_INET_C: i32 = 2;
+    const SOCK_DGRAM: i32 = 2;
+    const SOCK_RAW: i32 = 3;
+    const IPPROTO_ICMP: i32 = 1;
+    const ICMP_ECHO: u8 = 8;
+    const ICMP_ECHOREPLY: u8 = 0;
+
+    extern "C" {
+        fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+    }
+
+    /// Internet checksum (RFC 1071) over the ICMP message.
+    fn checksum(data: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+        let mut chunks = data.chunks_exact(2);
+        for c in &mut chunks {
+            sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+        }
+        if let [last] = *chunks.remainder() {
+            sum += (last as u32) << 8;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    // Identifier is informational on ping sockets (the kernel overwrites it),
+    // but is what distinguishes our echoes on a raw socket.
+    let ident = std::process::id() as u16;
+    let seq: u16 = 1;
+
+    let mut pkt = Vec::with_capacity(12);
+    pkt.push(ICMP_ECHO);
+    pkt.push(0); // code
+    pkt.extend_from_slice(&[0, 0]); // checksum placeholder
+    pkt.extend_from_slice(&ident.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(b"psnt");
+    let ck = checksum(&pkt);
+    pkt[2..4].copy_from_slice(&ck.to_be_bytes());
+
+    // Try unprivileged ping socket, then raw.
+    let (sock, is_raw) = unsafe {
+        let mut fd = socket(AF_INET_C, SOCK_DGRAM, IPPROTO_ICMP);
+        let mut raw = false;
+        if fd < 0 {
+            fd = socket(AF_INET_C, SOCK_RAW, IPPROTO_ICMP);
+            raw = true;
+        }
+        if fd < 0 {
+            return false;
+        }
+        (UdpSocket::from_raw_fd(fd), raw)
+    };
+
+    if sock
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .is_err()
+    {
+        return false;
+    }
+    if sock
+        .send_to(&pkt, SocketAddrV4::new(target, 0))
+        .is_err()
+    {
+        return false;
+    }
+
+    // Read until the timeout expires, ignoring replies from other addresses —
+    // a raw socket sees every ICMP packet arriving at the host, including the
+    // echoes belonging to the other threads in this sweep.
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    let mut buf = [0u8; 256];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = sock.set_read_timeout(Some(remaining));
+
+        let (len, src) = match sock.recv_from(&mut buf) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        if src.ip() != std::net::IpAddr::V4(target) {
+            continue;
+        }
+
+        // A raw socket hands back the IP header; a ping socket does not.
+        let icmp = if is_raw {
+            let ihl = ((buf[0] & 0x0F) as usize) * 4;
+            if len < ihl + 8 {
+                continue;
+            }
+            &buf[ihl..len]
+        } else {
+            if len < 8 {
+                continue;
+            }
+            &buf[..len]
+        };
+
+        if icmp[0] == ICMP_ECHOREPLY {
+            return true;
+        }
+    }
+}
+
+#[cfg(windows)]
 fn icmp_ping_one(target: Ipv4Addr) -> bool {
     unsafe {
         let handle = IcmpCreateFile();
@@ -797,10 +1009,14 @@ fn reverse_dns(ip: Ipv4Addr) -> Option<String> {
     };
 
     let mut host = [0u8; 256];
+    #[cfg(windows)]
+    let salen = std::mem::size_of::<SOCKADDR_IN>() as i32;
+    #[cfg(not(windows))]
+    let salen = std::mem::size_of::<SOCKADDR_IN>() as u32;
     let ret = unsafe {
         getnameinfo(
             &sa,
-            std::mem::size_of::<SOCKADDR_IN>() as i32,
+            salen,
             host.as_mut_ptr(),
             host.len() as u32,
             std::ptr::null_mut(),
@@ -969,9 +1185,51 @@ pub struct ArpCacheEntry {
     pub mac: Option<String>,
 }
 
+/// Read ALL entries from the OS neighbour table (/proc/net/arp).
+/// This is instant, zero network traffic, and returns entries from all interfaces.
+#[cfg(not(windows))]
+pub(crate) fn arp_cache_read_all() -> Vec<ArpCacheEntry> {
+    use crate::network::linux;
+
+    // /proc/net/arp names the device; the UI groups by a numeric index, so map
+    // each name to its kernel ifindex once.
+    let mut ifindex: HashMap<String, u32> = HashMap::new();
+
+    let mut entries = Vec::new();
+    for e in linux::arp_table() {
+        // Skip link-local and broadcast
+        let octets = e.ip.octets();
+        if octets[0] == 169 && octets[1] == 254 {
+            continue;
+        }
+        if octets[0] == 255 || e.ip.is_broadcast() || e.ip.is_loopback() {
+            continue;
+        }
+        // Skip multicast (224-239.x.x.x)
+        if octets[0] >= 224 && octets[0] <= 239 {
+            continue;
+        }
+
+        let idx = *ifindex.entry(e.iface.clone()).or_insert_with(|| {
+            linux::sysfs_attr(&e.iface, "ifindex")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+
+        entries.push(ArpCacheEntry {
+            if_index: idx,
+            ip: e.ip,
+            mac: Some(e.mac.to_uppercase()),
+        });
+    }
+
+    entries
+}
+
 /// Read ALL entries from the OS ARP cache (GetIpNetTable).
 /// This is instant, zero network traffic, and returns entries from all interfaces.
 /// Filters out invalid entries (type < 3).
+#[cfg(windows)]
 pub(crate) fn arp_cache_read_all() -> Vec<ArpCacheEntry> {
     let mut entries = Vec::new();
 
@@ -1031,6 +1289,9 @@ pub(crate) fn arp_cache_read_all() -> Vec<ArpCacheEntry> {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/// Only the Win32 paths hand back raw MAC bytes; /proc/net/arp already
+/// formats them, so this is unused on Linux.
+#[cfg(windows)]
 pub(crate) fn format_mac(bytes: &[u8; 6]) -> String {
     format!(
         "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",

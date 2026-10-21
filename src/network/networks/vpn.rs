@@ -29,6 +29,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ─── Win32 ICMP FFI ────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 #[link(name = "iphlpapi")]
 extern "system" {
     fn IcmpCreateFile() -> isize;
@@ -45,6 +46,7 @@ extern "system" {
     ) -> u32;
 }
 
+#[cfg(windows)]
 const INVALID_HANDLE_VALUE: isize = -1;
 
 // ─── Internal types ─────────────────────────────────────────────────────────
@@ -816,6 +818,14 @@ fn icmp_sweep_vpn(targets: &[Ipv4Addr]) -> Vec<VpnPeer> {
     hits.into_inner().unwrap()
 }
 
+/// Shares the hand-rolled ICMP echo from `probes`, so both sweeps use the same
+/// ping-socket-then-raw-socket fallback rather than two copies of it.
+#[cfg(not(windows))]
+fn icmp_ping_one(target: Ipv4Addr) -> bool {
+    super::probes::icmp_ping_one(target)
+}
+
+#[cfg(windows)]
 fn icmp_ping_one(target: Ipv4Addr) -> bool {
     unsafe {
         let handle = IcmpCreateFile();

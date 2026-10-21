@@ -25,6 +25,10 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Convert a raw network-byte-order port (u32 from Windows API) to host u16.
+///
+/// Only the Win32 MIB tables store ports this way; /proc/net prints them
+/// already host-ordered.
+#[cfg(windows)]
 pub fn ntohs(port: u32) -> u16 {
     ((port & 0xFF) << 8 | (port >> 8) & 0xFF) as u16
 }

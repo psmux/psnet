@@ -21,6 +21,8 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn quiet_command(program: &str) -> Command {
+    // `mut` is only needed for the Windows-only creation_flags call below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     {

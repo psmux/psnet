@@ -1,12 +1,19 @@
-//! Enumerates all listening TCP and UDP ports on the local machine using
-//! Windows `GetExtendedTcpTable` / `GetExtendedUdpTable` APIs.
+//! Enumerates all listening TCP and UDP ports on the local machine.
 //!
-//! Performance: uses `TCP_TABLE_OWNER_PID_LISTENER` class (value 3) which
-//! returns ONLY listening sockets — much faster than `TCP_TABLE_OWNER_PID_ALL`.
-//! Typical call completes in 1-5 ms.
+//! On Windows this uses `GetExtendedTcpTable` / `GetExtendedUdpTable` with the
+//! `TCP_TABLE_OWNER_PID_LISTENER` class (value 3), which returns ONLY listening
+//! sockets — much faster than `TCP_TABLE_OWNER_PID_ALL`. Typical call completes
+//! in 1-5 ms.
+//!
+//! On Linux the same information comes from /proc/net/{tcp,tcp6,udp,udp6},
+//! filtered to the LISTEN state, with ownership joined via socket inodes.
 
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::collections::HashSet;
+use std::net::IpAddr;
+#[cfg(windows)]
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
@@ -41,6 +48,7 @@ pub struct ProcessInfo {
 
 // ─── Windows FFI declarations ────────────────────────────────────────────────
 
+#[cfg(windows)]
 #[link(name = "iphlpapi")]
 extern "system" {
     fn GetExtendedTcpTable(
@@ -62,19 +70,25 @@ extern "system" {
     ) -> u32;
 }
 
+#[cfg(windows)]
 const AF_INET: u32 = 2;
+#[cfg(windows)]
 const AF_INET6: u32 = 23;
 
 /// TCP_TABLE_OWNER_PID_LISTENER — returns only LISTENING TCP rows.
+#[cfg(windows)]
 const TCP_TABLE_OWNER_PID_LISTENER: u32 = 3;
 
 /// UDP_TABLE_OWNER_PID — returns all UDP rows (UDP has no "listen" state).
+#[cfg(windows)]
 const UDP_TABLE_OWNER_PID: u32 = 1;
 
+#[cfg(windows)]
 const NO_ERROR: u32 = 0;
 
 // ─── Windows SCM FFI (advapi32) for svchost service resolution ──────────────
 
+#[cfg(windows)]
 #[link(name = "advapi32")]
 extern "system" {
     fn OpenSCManagerW(
@@ -99,11 +113,16 @@ extern "system" {
     fn CloseServiceHandle(hSCObject: *mut std::ffi::c_void) -> i32;
 }
 
+#[cfg(windows)]
 const SC_MANAGER_ENUMERATE_SERVICE: u32 = 0x0004;
+#[cfg(windows)]
 const SC_ENUM_PROCESS_INFO: u32 = 0;
+#[cfg(windows)]
 const SERVICE_WIN32: u32 = 0x30;
+#[cfg(windows)]
 const SERVICE_ACTIVE: u32 = 0x01;
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct ENUM_SERVICE_STATUS_PROCESSW {
@@ -112,6 +131,7 @@ struct ENUM_SERVICE_STATUS_PROCESSW {
     ServiceStatusProcess: SERVICE_STATUS_PROCESS,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct SERVICE_STATUS_PROCESS {
@@ -127,6 +147,7 @@ struct SERVICE_STATUS_PROCESS {
 }
 
 /// Read a null-terminated UTF-16 string from a raw pointer.
+#[cfg(windows)]
 unsafe fn wstr_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
@@ -138,9 +159,19 @@ unsafe fn wstr_to_string(ptr: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
+/// Service-name resolution is a Windows SCM concept with no Linux counterpart:
+/// there is no equivalent of svchost.exe multiplexing many services into one
+/// process, so a PID already maps to a single identifiable program via
+/// /proc/<pid>/{comm,exe,cmdline}.
+#[cfg(not(windows))]
+pub fn resolve_service_names(_pids: &[u32]) -> HashMap<u32, Vec<String>> {
+    HashMap::new()
+}
+
 /// Resolve Windows service names for a set of PIDs using the SCM API.
 /// Returns a map of PID -> Vec<service_name> (lowercase).
 /// Equivalent to `tasklist /svc` for the given PIDs.
+#[cfg(windows)]
 pub fn resolve_service_names(pids: &[u32]) -> HashMap<u32, Vec<String>> {
     let mut result: HashMap<u32, Vec<String>> = HashMap::new();
     if pids.is_empty() {
@@ -228,6 +259,7 @@ pub fn resolve_service_names(pids: &[u32]) -> HashMap<u32, Vec<String>> {
 
 // ─── Windows Version Info FFI (version.dll) ─────────────────────────────────
 
+#[cfg(windows)]
 #[link(name = "version")]
 extern "system" {
     fn GetFileVersionInfoSizeW(lptstrFilename: *const u16, lpdwHandle: *mut u32) -> u32;
@@ -254,12 +286,22 @@ pub struct ExeVersionInfo {
 }
 
 /// Encode a Rust string as null-terminated UTF-16 for Windows API calls.
+#[cfg(windows)]
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// ELF binaries carry no equivalent of the PE VersionInfo resource — there is
+/// no standard place a Linux executable records its product/company name — so
+/// the UI falls back to the process and executable names.
+#[cfg(not(windows))]
+pub fn read_exe_version_info(_exe_path: &str) -> Option<ExeVersionInfo> {
+    None
+}
+
 /// Read VersionInfo strings from a PE executable file.
 /// Returns None if the file has no version resource or cannot be read.
+#[cfg(windows)]
 pub fn read_exe_version_info(exe_path: &str) -> Option<ExeVersionInfo> {
     if exe_path.is_empty() {
         return None;
@@ -350,6 +392,7 @@ pub fn read_exe_version_info(exe_path: &str) -> Option<ExeVersionInfo> {
 
 // ─── MIB structs (repr C, matching Windows layout) ───────────────────────────
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_TCPROW_OWNER_PID {
@@ -361,6 +404,7 @@ struct MIB_TCPROW_OWNER_PID {
     dwOwningPid: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_TCPTABLE_OWNER_PID {
@@ -368,6 +412,7 @@ struct MIB_TCPTABLE_OWNER_PID {
     table: [MIB_TCPROW_OWNER_PID; 1],
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_TCP6ROW_OWNER_PID {
@@ -381,6 +426,7 @@ struct MIB_TCP6ROW_OWNER_PID {
     dwOwningPid: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_TCP6TABLE_OWNER_PID {
@@ -388,6 +434,7 @@ struct MIB_TCP6TABLE_OWNER_PID {
     table: [MIB_TCP6ROW_OWNER_PID; 1],
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_UDPROW_OWNER_PID {
@@ -396,6 +443,7 @@ struct MIB_UDPROW_OWNER_PID {
     dwOwningPid: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_UDPTABLE_OWNER_PID {
@@ -403,6 +451,7 @@ struct MIB_UDPTABLE_OWNER_PID {
     table: [MIB_UDPROW_OWNER_PID; 1],
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_UDP6ROW_OWNER_PID {
@@ -412,6 +461,7 @@ struct MIB_UDP6ROW_OWNER_PID {
     dwOwningPid: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct MIB_UDP6TABLE_OWNER_PID {
@@ -424,6 +474,7 @@ struct MIB_UDP6TABLE_OWNER_PID {
 /// Convert a port value from network byte order (as stored in MIB tables)
 /// to host byte order. The Windows API stores ports in a u32 where only the
 /// lower 16 bits matter, but those 16 bits are in big-endian order.
+#[cfg(windows)]
 #[inline]
 fn port_from_raw(raw: u32) -> u16 {
     (((raw >> 8) & 0xFF) | ((raw & 0xFF) << 8)) as u16
@@ -432,12 +483,56 @@ fn port_from_raw(raw: u32) -> u16 {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Enumerate all listening TCP and UDP ports. Fast (~1-5 ms).
+#[cfg(windows)]
 pub fn enumerate_listeners() -> Vec<RawListener> {
     let mut result = Vec::new();
     enumerate_tcp4_listeners(&mut result);
     enumerate_tcp6_listeners(&mut result);
     enumerate_udp4_listeners(&mut result);
     enumerate_udp6_listeners(&mut result);
+    result
+}
+
+/// Enumerate all listening TCP and UDP ports from procfs.
+///
+/// TCP rows are filtered to state 0x0A (LISTEN), the equivalent of asking
+/// Windows for the TCP_TABLE_OWNER_PID_LISTENER class. All UDP rows are
+/// returned, matching UDP_TABLE_OWNER_PID — UDP has no listen state.
+#[cfg(not(windows))]
+pub fn enumerate_listeners() -> Vec<RawListener> {
+    use crate::network::linux;
+
+    /// Linux TCP_LISTEN, from include/net/tcp_states.h.
+    const TCP_LISTEN: u8 = 10;
+
+    let owners = linux::socket_inode_to_pid();
+    let mut result = Vec::new();
+
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        for e in linux::read_socket_table(path) {
+            if e.state != TCP_LISTEN {
+                continue;
+            }
+            result.push(RawListener {
+                proto: ListenProto::Tcp,
+                bind_addr: e.local_addr,
+                port: e.local_port,
+                pid: owners.get(&e.inode).copied().unwrap_or(0),
+            });
+        }
+    }
+
+    for path in ["/proc/net/udp", "/proc/net/udp6"] {
+        for e in linux::read_socket_table(path) {
+            result.push(RawListener {
+                proto: ListenProto::Udp,
+                bind_addr: e.local_addr,
+                port: e.local_port,
+                pid: owners.get(&e.inode).copied().unwrap_or(0),
+            });
+        }
+    }
+
     result
 }
 
@@ -511,6 +606,7 @@ pub fn resolve_process_info(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
 
 // ─── TCP IPv4 listeners ──────────────────────────────────────────────────────
 
+#[cfg(windows)]
 fn enumerate_tcp4_listeners(result: &mut Vec<RawListener>) {
     unsafe {
         let mut size: u32 = 0;
@@ -559,6 +655,7 @@ fn enumerate_tcp4_listeners(result: &mut Vec<RawListener>) {
 
 // ─── TCP IPv6 listeners ──────────────────────────────────────────────────────
 
+#[cfg(windows)]
 fn enumerate_tcp6_listeners(result: &mut Vec<RawListener>) {
     unsafe {
         let mut size: u32 = 0;
@@ -607,6 +704,7 @@ fn enumerate_tcp6_listeners(result: &mut Vec<RawListener>) {
 
 // ─── UDP IPv4 listeners ──────────────────────────────────────────────────────
 
+#[cfg(windows)]
 fn enumerate_udp4_listeners(result: &mut Vec<RawListener>) {
     unsafe {
         let mut size: u32 = 0;
@@ -655,6 +753,7 @@ fn enumerate_udp4_listeners(result: &mut Vec<RawListener>) {
 
 // ─── UDP IPv6 listeners ──────────────────────────────────────────────────────
 
+#[cfg(windows)]
 fn enumerate_udp6_listeners(result: &mut Vec<RawListener>) {
     unsafe {
         let mut size: u32 = 0;

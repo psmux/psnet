@@ -1,5 +1,9 @@
 pub mod capture;
 pub mod connections;
+/// Linux data-acquisition backend (procfs/sysfs), used in place of the Win32
+/// APIs the original data layer is written against.
+#[cfg(not(windows))]
+pub mod linux;
 pub mod dns;
 pub mod sniffer;
 pub mod speed;

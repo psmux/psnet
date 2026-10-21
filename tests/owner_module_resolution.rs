@@ -4,6 +4,8 @@
 // this test process, proving struct layouts and the two-call buffer pattern
 // work on the running OS rather than only in theory.
 
+// The module-owner lookup only exists on Windows.
+#![cfg(windows)]
 #![allow(dead_code)]
 
 #[path = "../src/types.rs"]

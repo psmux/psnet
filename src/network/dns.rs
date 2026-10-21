@@ -9,9 +9,12 @@ use std::net::IpAddr;
 //
 // We use both: the API for every tick, and ipconfig as supplement.
 
+#[cfg(windows)]
 const DNS_TYPE_A: u16 = 1;
+#[cfg(windows)]
 const DNS_TYPE_AAAA: u16 = 28;
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct DNS_CACHE_ENTRY {
@@ -22,6 +25,7 @@ struct DNS_CACHE_ENTRY {
     dwFlags: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 struct DNS_RECORD {
@@ -35,6 +39,7 @@ struct DNS_RECORD {
     Data: DNS_RECORD_DATA,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
 union DNS_RECORD_DATA {
@@ -43,6 +48,7 @@ union DNS_RECORD_DATA {
     _pad: [u8; 64],
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[derive(Copy, Clone)]
 #[allow(non_snake_case, non_camel_case_types)]
@@ -50,6 +56,7 @@ struct DNS_A_DATA {
     IpAddress: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[derive(Copy, Clone)]
 #[allow(non_snake_case, non_camel_case_types)]
@@ -57,8 +64,10 @@ struct DNS_AAAA_DATA {
     Ip6Address: [u8; 16],
 }
 
+#[cfg(windows)]
 const DNS_QUERY_NO_WIRE_QUERY: u32 = 0x10;
 
+#[cfg(windows)]
 #[link(name = "dnsapi")]
 extern "system" {
     fn DnsGetCacheDataTable(
@@ -83,9 +92,11 @@ extern "system" {
 }
 
 /// DNS_FREE_TYPE::DnsFreeFlat — frees a single flat allocation.
+#[cfg(windows)]
 const DNS_FREE_FLAT: i32 = 0;
 
 /// Read the Windows DNS resolver cache via DnsGetCacheDataTable API.
+#[cfg(windows)]
 pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
     let mut reverse_map: HashMap<IpAddr, String> = HashMap::new();
 
@@ -160,6 +171,7 @@ pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
 }
 
 /// Parse `ipconfig /displaydns` output — reliable documented fallback.
+#[cfg(windows)]
 pub fn read_dns_cache_ipconfig() -> HashMap<IpAddr, String> {
     let mut reverse_map: HashMap<IpAddr, String> = HashMap::new();
 
@@ -217,6 +229,7 @@ pub fn read_dns_cache_ipconfig() -> HashMap<IpAddr, String> {
 // ─── System DNS server detection ──────────────────────────────────────────────
 
 /// Get the system-configured DNS servers by parsing `ipconfig /all`.
+#[cfg(windows)]
 pub fn get_system_dns_servers() -> Vec<IpAddr> {
     let output = std::process::Command::new("ipconfig")
         .arg("/all")
@@ -255,6 +268,56 @@ pub fn get_system_dns_servers() -> Vec<IpAddr> {
                 }
             } else {
                 in_dns_section = false;
+            }
+        }
+    }
+
+    servers
+}
+
+// ─── Linux implementations ───────────────────────────────────────────────────
+
+/// Linux exposes no readable system-wide DNS cache. glibc's resolver keeps no
+/// shared cache, and when a caching resolver is present (dnsmasq on OpenWrt,
+/// systemd-resolved elsewhere) its cache is private to that daemon with no
+/// query API. Reverse names still come from the resolver via `lookup_addr`.
+#[cfg(not(windows))]
+pub fn read_dns_cache_api() -> HashMap<IpAddr, String> {
+    HashMap::new()
+}
+
+/// No `ipconfig /displaydns` equivalent exists — see `read_dns_cache_api`.
+#[cfg(not(windows))]
+pub fn read_dns_cache_ipconfig() -> HashMap<IpAddr, String> {
+    HashMap::new()
+}
+
+/// Get the system-configured DNS servers from /etc/resolv.conf.
+///
+/// Note that on a router running dnsmasq this usually reports 127.0.0.1 — the
+/// local resolver — which is correct: that is what the system queries.
+#[cfg(not(windows))]
+pub fn get_system_dns_servers() -> Vec<IpAddr> {
+    let text = match std::fs::read_to_string("/etc/resolv.conf") {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut servers = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("nameserver") else {
+            continue;
+        };
+        // Strip any zone index ("fe80::1%eth0"), which IpAddr won't parse.
+        let addr = rest.trim();
+        let addr = addr.split('%').next().unwrap_or(addr);
+        if let Ok(ip) = addr.parse::<IpAddr>() {
+            if !servers.contains(&ip) {
+                servers.push(ip);
             }
         }
     }
@@ -307,6 +370,7 @@ pub fn port_service_name(port: u16) -> Option<&'static str> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
 unsafe fn wstr_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
@@ -318,6 +382,7 @@ unsafe fn wstr_to_string(ptr: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
+#[cfg(windows)]
 fn string_to_wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

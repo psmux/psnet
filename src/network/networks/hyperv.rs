@@ -24,6 +24,8 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Create a PowerShell Command with CREATE_NO_WINDOW on Windows.
 fn quiet_powershell() -> Command {
+    // `mut` is only needed for the Windows-only creation_flags call below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new("powershell");
     #[cfg(target_os = "windows")]
     {
