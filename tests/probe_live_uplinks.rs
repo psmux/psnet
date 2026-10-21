@@ -3,10 +3,9 @@
 // visible when debugging traffic totals (issue #6).
 // Run: cargo test --test probe_live_uplinks -- --ignored --nocapture
 
+#[path = "../src/network"]
 mod network {
-    #[path = "../../src/network/speed.rs"]
     pub mod speed;
-    #[path = "../../src/network/uplink.rs"]
     pub mod uplink;
 }
 

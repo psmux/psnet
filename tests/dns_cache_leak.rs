@@ -1,6 +1,9 @@
 // Regression test for issue #5: read_dns_cache_api leaked the entire
 // DnsGetCacheDataTable linked list (entries + name strings) on every call.
 // Called every 2 seconds, this compounded to gigabytes over long sessions.
+// The leak, and the PrivateBytes probe that measures it, are Win32-only.
+#![cfg(windows)]
+
 #[path = "../src/network/dns.rs"]
 mod dns;
 

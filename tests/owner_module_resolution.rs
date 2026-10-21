@@ -14,8 +14,8 @@ mod types;
 #[path = "../src/utils.rs"]
 mod utils;
 
+#[path = "../src/network"]
 mod network {
-    #[path = "../../src/network/connections.rs"]
     pub mod connections;
 }
 
