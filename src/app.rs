@@ -609,6 +609,10 @@ impl App {
         // Firewall manager tick (periodic rule refresh)
         if !self.disabled.contains("firewall") {
             self.firewall_manager.tick();
+            // Linux: keep the nftables matches in step with live PIDs so blocks
+            // and deny-all keep applying as processes respawn.
+            #[cfg(not(windows))]
+            self.firewall_manager.update_identities(&self.connections);
         }
 
         // Ask-to-connect mode: check new processes

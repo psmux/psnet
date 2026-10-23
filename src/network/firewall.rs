@@ -1,14 +1,25 @@
-//! Windows Firewall integration via netsh advfirewall.
+//! Firewall integration: per-app block/allow, deny-all policy, lockdown mode,
+//! and ask-to-connect tracking.
 //!
-//! Provides: rule enumeration, block/allow per-app, lockdown mode,
-//! and ask-to-connect mode tracking.
+//! The cross-platform [`FirewallManager`] state lives here. The system-affecting
+//! primitives are split by platform: Windows drives `netsh advfirewall` (below),
+//! while Linux drives nftables through the [`sys`] backend. The public API is the
+//! same on both so the UI and app loop never branch on platform.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use crate::types::{FirewallAppAction, FirewallMode, FirewallRule};
+
+#[cfg(not(windows))]
+use crate::types::Connection;
+
+#[cfg(not(windows))]
+#[path = "firewall_linux.rs"]
+mod sys;
 
 /// Manages firewall state and rules.
 pub struct FirewallManager {
@@ -39,6 +50,13 @@ pub struct FirewallManager {
     /// Default policy: false = allow-all (block what you block),
     ///                  true  = deny-all  (only allow what you allow).
     pub default_deny: bool,
+    /// Linux-only: resolved netfilter identity (cgroup/UID) per managed app,
+    /// refreshed from live PIDs so nft rules keep matching across respawns.
+    #[cfg(not(windows))]
+    app_matches: HashMap<String, sys::AppMatch>,
+    /// Linux-only: last nft script applied, used to skip redundant reloads.
+    #[cfg(not(windows))]
+    last_applied: Option<String>,
 }
 
 impl FirewallManager {
@@ -69,6 +87,10 @@ impl FirewallManager {
             app_actions,
             state_path,
             default_deny: false,
+            #[cfg(not(windows))]
+            app_matches: HashMap::new(),
+            #[cfg(not(windows))]
+            last_applied: None,
         }
     }
 
@@ -175,9 +197,34 @@ impl FirewallManager {
     /// Apply a firewall action (Allow / Deny / Drop) for an app.
     /// Removes any previous PSNET rules for this app first, then creates new ones.
     pub fn apply_action(&mut self, app_name: &str, process_path: Option<&str>, action: FirewallAppAction) -> bool {
-        let base = app_name.rsplit('\\').next().unwrap_or(app_name);
+        let _ = process_path; // Linux matches by cgroup/UID, not the exe path
+        let base = app_basename(app_name);
         let key = base.to_lowercase();
 
+        #[cfg(not(windows))]
+        {
+            // Linux enforces the whole policy declaratively through nftables, so
+            // record the intent, (re)resolve how this app is matched from its
+            // live PIDs, then rebuild the managed table.
+            self.blocked_apps.remove(&key);
+            self.approved_apps.remove(&key);
+            match &action {
+                FirewallAppAction::Deny | FirewallAppAction::Drop => {
+                    self.blocked_apps.insert(key.clone());
+                }
+                FirewallAppAction::Allow => {
+                    self.approved_apps.insert(key.clone());
+                }
+            }
+            self.app_matches
+                .insert(key.clone(), sys::resolve_match(&sys::pids_for_app(&key)));
+            self.app_actions.insert(key, action);
+            self.save_state_to_disk();
+            return self.linux_enforce();
+        }
+
+        #[cfg(windows)]
+        {
         // Remove any existing PSNET rules for this app
         self.remove_psnet_rules(base);
 
@@ -223,9 +270,11 @@ impl FirewallManager {
             self.refresh_rules();
         }
         ok
+        }
     }
 
     /// Remove all PSNET-created rules (Block, Allow, Drop) for a specific app.
+    #[cfg(windows)]
     fn remove_psnet_rules(&mut self, app_name: &str) {
         for prefix in &["PSNET_Block_", "PSNET_Allow_", "PSNET_Drop_"] {
             let rule = format!("{}{}", prefix, app_name);
@@ -237,21 +286,37 @@ impl FirewallManager {
 
     /// Remove ALL PSNET firewall rules and reset state to defaults.
     pub fn reset_all_psnet_rules(&mut self) {
-        let apps: Vec<String> = self.app_actions.keys().cloned().collect();
-        for key in &apps {
-            let base = key.rsplit('\\').next().unwrap_or(key);
-            self.remove_psnet_rules(base);
-        }
-        for rule in &self.rules {
-            if rule.name.starts_with("PSNET_") {
-                let _ = netsh_delete_rule(&rule.name);
+        #[cfg(windows)]
+        {
+            let apps: Vec<String> = self.app_actions.keys().cloned().collect();
+            for key in &apps {
+                let base = app_basename(key);
+                self.remove_psnet_rules(base);
+            }
+            for rule in &self.rules {
+                if rule.name.starts_with("PSNET_") {
+                    let _ = netsh_delete_rule(&rule.name);
+                }
             }
         }
+
         self.app_actions.clear();
         self.blocked_apps.clear();
         self.approved_apps.clear();
         self.mode = FirewallMode::Normal;
+        self.default_deny = false;
+
+        #[cfg(not(windows))]
+        {
+            self.app_matches.clear();
+            sys::teardown();
+            self.last_applied = None;
+            self.enabled = is_firewall_enabled();
+        }
+
         self.save_state_to_disk();
+
+        #[cfg(windows)]
         self.refresh_rules();
     }
 
@@ -263,6 +328,91 @@ impl FirewallManager {
     /// Toggle default policy between allow-all and deny-all.
     pub fn toggle_default_policy(&mut self) {
         self.default_deny = !self.default_deny;
+        #[cfg(not(windows))]
+        {
+            // Deny-all must know every allowed app's identity to let it through,
+            // so refresh matches from live PIDs before rebuilding the table.
+            self.refresh_app_matches();
+            self.linux_enforce();
+        }
+    }
+
+    /// Linux: re-resolve how each managed app is matched in netfilter from its
+    /// currently-running PIDs, dropping identities for apps no longer managed.
+    #[cfg(not(windows))]
+    fn refresh_app_matches(&mut self) {
+        self.app_matches.retain(|k, _| self.app_actions.contains_key(k));
+        let keys: Vec<String> = self.app_actions.keys().cloned().collect();
+        for key in keys {
+            let m = sys::resolve_match(&sys::pids_for_app(&key));
+            self.app_matches.insert(key, m);
+        }
+    }
+
+    /// Linux: refresh identities from the live connection table (cheaper than a
+    /// full /proc scan — the firewall tab only acts on apps that have sockets)
+    /// and rebuild the nft table if anything changed. Called from the app tick.
+    #[cfg(not(windows))]
+    pub fn update_identities(&mut self, conns: &[Connection]) {
+        if self.app_actions.is_empty() && !self.default_deny {
+            return;
+        }
+        // Group live PIDs by app key for the apps we manage.
+        let mut pids: HashMap<String, Vec<u32>> = HashMap::new();
+        for c in conns {
+            if c.pid == 0 || c.process_name.is_empty() {
+                continue;
+            }
+            let key = c.process_name.to_lowercase();
+            if self.app_actions.contains_key(&key) {
+                pids.entry(key).or_default().push(c.pid);
+            }
+        }
+        self.app_matches.retain(|k, _| self.app_actions.contains_key(k));
+        for (key, pid_list) in pids {
+            let m = sys::resolve_match(&pid_list);
+            // Keep a previously-resolved identity for an app that momentarily has
+            // no live sockets rather than forgetting how to match it.
+            if m.is_usable() {
+                self.app_matches.insert(key, m);
+            }
+        }
+        self.linux_enforce();
+    }
+
+    /// Linux: build the policy spec from managed state, rebuild the nft table if
+    /// it changed since the last apply, and refresh the shield status. Returns
+    /// whether the system now reflects the request.
+    #[cfg(not(windows))]
+    fn linux_enforce(&mut self) -> bool {
+        let mut apps = Vec::new();
+        for (key, action) in &self.app_actions {
+            let matcher = match self.app_matches.get(key) {
+                Some(m) if m.is_usable() => m.clone(),
+                _ => continue, // not running / cannot isolate → nothing to enforce
+            };
+            let relevant = match (self.default_deny, action) {
+                (true, FirewallAppAction::Allow) => true,
+                (false, FirewallAppAction::Deny | FirewallAppAction::Drop) => true,
+                _ => false,
+            };
+            if relevant {
+                apps.push(sys::AppPolicy { action: action.clone(), matcher });
+            }
+        }
+        let spec = sys::PolicySpec { default_deny: self.default_deny, apps };
+        let script = sys::render(&spec);
+        if self.last_applied.as_deref() == Some(script.as_str()) {
+            return true; // already applied — skip the reload (and the status probe)
+        }
+        let ok = sys::apply(&spec);
+        if ok {
+            self.last_applied = Some(script);
+        }
+        // Only probe the shield status when we actually changed the ruleset; the
+        // periodic background refresh in tick() handles the steady state.
+        self.enabled = is_firewall_enabled();
+        ok
     }
 
     /// Effective status of an app considering default policy.
@@ -287,8 +437,18 @@ impl FirewallManager {
 
 }
 
-// ─── Netsh helpers ───────────────────────────────────────────────────────────
+/// The app's base name, tolerant of both Windows (`\`) and POSIX (`/`) paths so
+/// a full executable path and a bare process name both key the same entry.
+fn app_basename(app_name: &str) -> &str {
+    app_name
+        .rsplit(|c| c == '\\' || c == '/')
+        .next()
+        .unwrap_or(app_name)
+}
 
+// ─── Netsh helpers (Windows) ──────────────────────────────────────────────────
+
+#[cfg(windows)]
 fn netsh_add_rule(name: &str, dir: &str, action: &str, program: &str) -> bool {
     Command::new("netsh")
         .args([
@@ -305,6 +465,7 @@ fn netsh_add_rule(name: &str, dir: &str, action: &str, program: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
 fn netsh_delete_rule(name: &str) -> bool {
     Command::new("netsh")
         .args([
@@ -318,7 +479,22 @@ fn netsh_delete_rule(name: &str) -> bool {
 
 // ─── System queries ──────────────────────────────────────────────────────────
 
+/// Linux: a packet-filtering firewall (fw4, firewalld, PSNET's own table, …) is
+/// loaded. Drives the "Shield" status.
+#[cfg(not(windows))]
+fn is_firewall_enabled() -> bool {
+    sys::is_enabled()
+}
+
+/// Linux: PSNET's managed nft table is rebuilt declaratively, so the rule list
+/// comes straight from the live table rather than being tracked rule-by-rule.
+#[cfg(not(windows))]
+fn fetch_firewall_rules() -> Vec<FirewallRule> {
+    sys::fetch_rules()
+}
+
 /// Check if Windows Firewall is enabled.
+#[cfg(windows)]
 fn is_firewall_enabled() -> bool {
     let output = Command::new("netsh")
         .args(["advfirewall", "show", "allprofiles", "state"])
@@ -334,6 +510,7 @@ fn is_firewall_enabled() -> bool {
 }
 
 /// Fetch firewall rules from netsh.
+#[cfg(windows)]
 fn fetch_firewall_rules() -> Vec<FirewallRule> {
     let output = Command::new("netsh")
         .args(["advfirewall", "firewall", "show", "rule", "name=all", "verbose"])
@@ -348,6 +525,7 @@ fn fetch_firewall_rules() -> Vec<FirewallRule> {
     parse_firewall_rules(&text)
 }
 
+#[cfg(windows)]
 fn parse_firewall_rules(text: &str) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
     let mut current_name = String::new();

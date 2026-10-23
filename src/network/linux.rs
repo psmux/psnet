@@ -195,6 +195,37 @@ pub fn process_exe(pid: u32) -> Option<String> {
     }
 }
 
+/// Real owner UID of a process from /proc/<pid>/status.
+///
+/// The `Uid:` line is `real  effective  saved  filesystem`; we take the real
+/// uid, which is what the kernel attributes a socket to for `meta skuid`.
+pub fn process_uid(pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// cgroup-v2 path of a process, relative to the cgroup2 mount (no leading '/').
+///
+/// On the unified hierarchy /proc/<pid>/cgroup has a single `0::<path>` line.
+/// The root cgroup is reported as an empty string (its path is just "/"), which
+/// callers treat as "not isolating" — matching it would match every process.
+pub fn process_cgroup2(pid: u32) -> Option<String> {
+    let content = fs::read_to_string(format!("/proc/{}/cgroup", pid)).ok()?;
+    for line in content.lines() {
+        // Unified hierarchy entry: "0::/path". Legacy v1 lines carry a
+        // controller name between the colons and are ignored here.
+        if let Some(path) = line.strip_prefix("0::") {
+            return Some(path.trim_start_matches('/').to_string());
+        }
+    }
+    None
+}
+
 // ─── neighbour table (/proc/net/arp) ────────────────────────────────────────
 
 pub struct ArpEntry {
