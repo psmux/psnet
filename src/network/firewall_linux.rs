@@ -114,7 +114,8 @@ pub struct AppPolicy {
 /// The complete PSNET-managed policy to render into the `inet psnet` table.
 pub struct PolicySpec {
     /// `true` = deny-all (default-drop output, allow only the safe set + Allowed
-    /// apps); `false` = allow-all (drop only Denied/Dropped apps).
+    /// apps, refuse Denied apps); `false` = allow-all (block only Denied/Dropped
+    /// apps).
     pub default_deny: bool,
     /// Apps with a usable matcher. Apps that cannot be isolated are excluded by
     /// the caller so an unenforceable block never silently widens the policy.
@@ -140,18 +141,36 @@ fn cgroup_level(path: &str) -> usize {
     path.split('/').filter(|c| !c.is_empty()).count()
 }
 
-/// Emit the match lines for one app with the given verdict (`accept`/`drop`).
-fn emit_app(out: &mut String, m: &AppMatch, verdict: &str) {
+/// Statements that make an app's traffic fail fast: TCP gets a reset and
+/// everything else an ICMP unreachable, so the app sees "connection refused"
+/// instead of waiting out a timeout. nft only allows `with tcp reset` after a
+/// TCP match, hence the separate catch-all `reject` for the other protocols.
+const REJECT: &[&str] = &["meta l4proto tcp reject with tcp reset", "reject"];
+
+/// nftables statements for an app's action. Deny refuses connections while
+/// Drop discards packets silently — Windows Firewall can only block, but
+/// netfilter can tell the two apart.
+fn verdicts(action: &FirewallAppAction) -> &'static [&'static str] {
+    match action {
+        FirewallAppAction::Allow => &["accept"],
+        FirewallAppAction::Deny => REJECT,
+        FirewallAppAction::Drop => &["drop"],
+    }
+}
+
+/// Emit one rule per (selector, statement) for an app.
+fn emit_app(out: &mut String, m: &AppMatch, statements: &[&str]) {
+    let mut selectors = Vec::new();
     for cg in &m.cgroups {
-        out.push_str(&format!(
-            "        socket cgroupv2 level {} \"{}\" {}\n",
-            cgroup_level(cg),
-            cg,
-            verdict
-        ));
+        selectors.push(format!("socket cgroupv2 level {} \"{}\"", cgroup_level(cg), cg));
     }
     for uid in &m.uids {
-        out.push_str(&format!("        meta skuid {} {}\n", uid, verdict));
+        selectors.push(format!("meta skuid {}", uid));
+    }
+    for sel in &selectors {
+        for stmt in statements {
+            out.push_str(&format!("        {} {}\n", sel, stmt));
+        }
     }
 }
 
@@ -174,18 +193,19 @@ pub fn render(spec: &PolicySpec) -> String {
         s.push_str("        meta l4proto { icmp, ipv6-icmp } accept\n");
         s.push_str("        udp dport { 53, 67, 68 } accept\n");
         s.push_str("        tcp dport { 22, 53 } accept\n");
+        // Allowed apps pass and Denied apps are refused. Dropped apps and
+        // everything unlisted fall through to the silent policy drop.
         for app in &spec.apps {
-            if matches!(app.action, FirewallAppAction::Allow) {
-                emit_app(&mut s, &app.matcher, "accept");
+            if !matches!(app.action, FirewallAppAction::Drop) {
+                emit_app(&mut s, &app.matcher, verdicts(&app.action));
             }
         }
-        // Denied/Dropped apps and everything unlisted fall through to policy drop.
     } else {
-        // Allow-all: only the explicitly Denied/Dropped apps are blocked.
+        // Allow-all: only the explicitly Denied (refused) / Dropped apps are blocked.
         s.push_str("        type filter hook output priority 0; policy accept;\n");
         for app in &spec.apps {
-            if matches!(app.action, FirewallAppAction::Deny | FirewallAppAction::Drop) {
-                emit_app(&mut s, &app.matcher, "drop");
+            if !matches!(app.action, FirewallAppAction::Allow) {
+                emit_app(&mut s, &app.matcher, verdicts(&app.action));
             }
         }
     }
@@ -275,7 +295,10 @@ pub fn fetch_rules() -> Vec<FirewallRule> {
         // Count the managed verdicts so the UI can reflect that PSNET is active.
         for line in out.lines() {
             let t = line.trim();
-            if t.ends_with(" drop") && (t.starts_with("socket ") || t.starts_with("meta skuid")) {
+            // One verdict line per selector: the catch-all `reject` (not the
+            // TCP-reset line before it) or `drop`.
+            let blocks = t.ends_with(" drop") || t.ends_with(" reject");
+            if blocks && (t.starts_with("socket ") || t.starts_with("meta skuid")) {
                 rules.push(FirewallRule {
                     name: format!("PSNET_Block_{}", rules.len()),
                     enabled: true,

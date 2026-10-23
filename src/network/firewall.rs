@@ -391,8 +391,10 @@ impl FirewallManager {
                 Some(m) if m.is_usable() => m.clone(),
                 _ => continue, // not running / cannot isolate → nothing to enforce
             };
+            // Deny-all needs rules for Allow (accept) and Deny (reject); Drop is
+            // the policy itself. Allow-all needs rules for Deny and Drop only.
             let relevant = match (self.default_deny, action) {
-                (true, FirewallAppAction::Allow) => true,
+                (true, FirewallAppAction::Allow | FirewallAppAction::Deny) => true,
                 (false, FirewallAppAction::Deny | FirewallAppAction::Drop) => true,
                 _ => false,
             };

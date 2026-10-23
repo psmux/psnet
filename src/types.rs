@@ -776,9 +776,11 @@ impl FirewallMode {
 pub enum FirewallAppAction {
     /// Explicit allow rule (override any other blocks).
     Allow,
-    /// Block (connection refused / dropped).
+    /// Block (connection refused / dropped). On Linux this is an nftables
+    /// `reject`, so the app sees "connection refused" immediately.
     Deny,
-    /// Silent drop (identical to Deny on Windows Firewall, tracked separately).
+    /// Silent drop (identical to Deny on Windows Firewall, tracked separately;
+    /// on Linux an nftables `drop`, so connections time out).
     Drop,
 }
 
