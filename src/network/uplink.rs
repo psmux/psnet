@@ -13,7 +13,7 @@ use crate::network::speed::aggregate_interface_bytes;
 pub fn get_network_bytes(networks: &Networks) -> (u64, u64, String) {
     let ifaces: Vec<(String, u64, u64)> = networks
         .iter()
-        .map(|(name, data)| (name.clone(), data.total_received(), data.total_transmitted()))
+        .map(|(name, data)| (name.to_string_lossy().into_owned(), data.total_received(), data.total_transmitted()))
         .collect();
     let uplinks = uplink_interface_names();
     aggregate_interface_bytes(&ifaces, uplinks.as_ref())

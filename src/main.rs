@@ -42,6 +42,11 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Init sysinfo Networks (fast, just enumerates adapters). Done before the
+    // terminal goes raw so an error prints normally.
+    let mut networks = sysinfo::Networks::new_with_refreshed_list()
+        .map_err(io::Error::other)?;
+
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -54,8 +59,6 @@ fn main() -> io::Result<()> {
     std::thread::spawn(|| { crate::network::oui::warm(); });
     std::thread::spawn(|| { crate::network::geoip::warm(); });
 
-    // Init sysinfo Networks (fast — just enumerates adapters)
-    let mut networks = sysinfo::Networks::new_with_refreshed_list();
     let mut app = App::new(&networks);
 
     // Draw FIRST frame immediately — before any heavy update()

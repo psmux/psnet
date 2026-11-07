@@ -304,8 +304,7 @@ pub fn fetch_connections(pid_cache: &mut PidCache) -> Vec<Connection> {
         }
 
         // Sysinfo fallback for unresolved PIDs
-        if !needs_sysinfo.is_empty() {
-            let mut sys = System::new();
+        if let (false, Ok(mut sys)) = (needs_sysinfo.is_empty(), System::new()) {
             let pids: Vec<Pid> = needs_sysinfo.iter().map(|&p| Pid::from_u32(p)).collect();
             sys.refresh_processes(ProcessesToUpdate::Some(&pids), true);
             for &pid in &needs_sysinfo {

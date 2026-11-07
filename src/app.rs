@@ -322,7 +322,7 @@ impl App {
             }
         }
 
-        networks.refresh();
+        networks.refresh(true);
         let (recv, sent, iface) = get_network_bytes(networks);
         let now = Instant::now();
         let elapsed = now.duration_since(self.prev_time).as_secs_f64();
@@ -427,16 +427,17 @@ impl App {
             let mut vm_down: u64 = 0;
             let mut vm_up: u64 = 0;
             for (name, data) in networks.iter() {
+                let name = name.to_string_lossy().into_owned();
                 if !name.starts_with("vEthernet") {
                     continue;
                 }
                 let recv = data.total_received();
                 let sent = data.total_transmitted();
-                if let Some((prev_recv, prev_sent)) = self.prev_vswitch_bytes.get(name) {
+                if let Some((prev_recv, prev_sent)) = self.prev_vswitch_bytes.get(&name) {
                     vm_down += sent.saturating_sub(*prev_sent);
                     vm_up += recv.saturating_sub(*prev_recv);
                 }
-                self.prev_vswitch_bytes.insert(name.clone(), (recv, sent));
+                self.prev_vswitch_bytes.insert(name, (recv, sent));
             }
             self.bandwidth_tracker.credit_virtual(vm_down, vm_up);
         }
@@ -2111,7 +2112,7 @@ mod filter_mode_tests {
     use super::*;
 
     fn test_app() -> App {
-        let networks = Networks::new_with_refreshed_list();
+        let networks = Networks::new_with_refreshed_list().expect("enumerate network interfaces");
         let mut app = App::new(&networks);
         app.bottom_tab = BottomTab::Connections;
         app

@@ -453,7 +453,7 @@ pub fn resolve_process_info(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
         return map;
     }
 
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else { return map };
     let sysinfo_pids: Vec<Pid> = pids.iter().map(|&p| Pid::from_u32(p)).collect();
     sys.refresh_processes(ProcessesToUpdate::Some(&sysinfo_pids), true);
 

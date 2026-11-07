@@ -77,7 +77,8 @@ pub struct TrustedIps {
 }
 
 impl TrustedIps {
-    /// An empty list that is never written to disk (tests, incognito).
+    /// An empty list that is never written to disk.
+    #[cfg(test)]
     pub fn in_memory() -> Self {
         Self { entries: Vec::new(), path: None }
     }

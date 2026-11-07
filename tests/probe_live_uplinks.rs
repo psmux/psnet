@@ -18,11 +18,11 @@ fn probe_live_uplinks() {
     let uplinks = network::uplink::uplink_interface_names();
     println!("UPLINK SET: {:?}", uplinks);
 
-    let networks = Networks::new_with_refreshed_list();
+    let networks = Networks::new_with_refreshed_list().expect("enumerate network interfaces");
     for (name, data) in networks.iter() {
         let counted = uplinks
             .as_ref()
-            .map(|set| set.contains(name))
+            .map(|set| set.contains(name.to_string_lossy().as_ref()))
             .unwrap_or(true);
         println!(
             "IFACE: {:?} recv={} sent={} counted={}",
