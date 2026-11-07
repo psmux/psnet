@@ -4,8 +4,8 @@
 //! peer, an ARP or device change) is not raised. The list lives in
 //! `trusted_ips.txt` next to `alerts.json`, one entry per line: a single
 //! address (`203.0.113.7`, `fe80::1`) or a CIDR range (`100.64.0.0/10`).
-//! Lines starting with `#` are comments. Press `w` on an alert to add or
-//! remove its address, or edit the file by hand.
+//! Lines starting with `#` are comments. Press `w` on an alert to add its
+//! address; edit the file by hand to add ranges or remove entries.
 
 use std::net::IpAddr;
 use std::path::PathBuf;

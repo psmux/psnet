@@ -1408,7 +1408,7 @@ impl App {
                     Some(ip) => {
                         if self.alert_engine.toggle_trusted(ip) {
                             self.alert_pane_scrolls = [0; 6];
-                            format!("Trusted {}: no more alerts about it (w on its alert again to undo)", ip)
+                            format!("Trusted {}: no more alerts about it. To undo, remove it from trusted_ips.txt", ip)
                         } else {
                             format!("{} is no longer trusted", ip)
                         }
