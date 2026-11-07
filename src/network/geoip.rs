@@ -169,7 +169,7 @@ impl GeoIpResolver {
 
         let reader = get_reader().as_ref()?;
 
-        let record: MmdbCountry = reader.lookup(addr).ok()?;
+        let record: MmdbCountry = reader.lookup(addr).ok()?.decode().ok()??;
         let info = record.country?;
         let iso = info.iso_code?;
         if iso.is_empty() {
