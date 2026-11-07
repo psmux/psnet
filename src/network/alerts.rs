@@ -319,7 +319,11 @@ impl AlertEngine {
             return;
         }
         for conn in connections {
-            if conn.process_name.is_empty() || conn.process_name.starts_with("PID:") {
+            // "[Kernel]" and "[Closed]" are placeholders, not apps
+            if conn.process_name.is_empty()
+                || conn.process_name.starts_with("PID:")
+                || conn.process_name.starts_with('[')
+            {
                 continue;
             }
             if matches!(conn.state.as_ref(), Some(TcpState::Listen)) {

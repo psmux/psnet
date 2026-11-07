@@ -323,9 +323,51 @@ pub fn fetch_connections(pid_cache: &mut PidCache) -> Vec<Connection> {
         } else if conn.pid != 0 {
             conn.process_name = format!("PID:{}", conn.pid);
         }
+        if let Some(label) = pid0_label(conn.pid, conn.state.as_ref()) {
+            conn.process_name = label.to_string();
+        }
     }
 
     conns
+}
+
+/// What to call a PID 0 row (issue #3). Windows reports PID 0 for a TCP
+/// connection whose process already closed its socket: the kernel keeps the
+/// connection in TIME_WAIT (or a FIN/close state) for a while, owned by
+/// nobody. Those are shown as `[Closed]`; the app that made them is gone
+/// from the table. Kernel mode clients such as SMB or HTTP.sys own their
+/// sockets as PID 4, `System`.
+pub fn pid0_label(pid: u32, state: Option<&TcpState>) -> Option<&'static str> {
+    if pid != 0 {
+        return None;
+    }
+    match state {
+        Some(
+            TcpState::TimeWait
+            | TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::Closing
+            | TcpState::LastAck
+            | TcpState::Closed
+            | TcpState::DeleteTcb,
+        ) => Some("[Closed]"),
+        _ => Some("[Kernel]"),
+    }
+}
+
+#[cfg(test)]
+mod pid0_tests {
+    use super::*;
+
+    #[test]
+    fn time_wait_rows_are_closed_not_kernel() {
+        assert_eq!(pid0_label(0, Some(&TcpState::TimeWait)), Some("[Closed]"));
+        assert_eq!(pid0_label(0, Some(&TcpState::FinWait2)), Some("[Closed]"));
+        assert_eq!(pid0_label(0, Some(&TcpState::Listen)), Some("[Kernel]"));
+        assert_eq!(pid0_label(0, None), Some("[Kernel]"));
+        assert_eq!(pid0_label(4, Some(&TcpState::TimeWait)), None);
+        assert_eq!(pid0_label(1234, Some(&TcpState::TimeWait)), None);
+    }
 }
 
 fn fetch_tcp4(conns: &mut Vec<Connection>) {
