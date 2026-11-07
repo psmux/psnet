@@ -352,8 +352,11 @@ jobs:
           # Try updating existing manifest first (works once a submission has
           # been merged into winget-pkgs). Invoke directly so output streams to
           # the log; never Start-Process -Wait, which hid the interactive hang.
+          # psnet is listed in winget as marlocarlo.psnet (the repo's earlier
+          # owner). A psmux.psnet submission was closed as a duplicate of it,
+          # so each release updates marlocarlo.psnet.
           Write-Host "--- Attempting manifest update via wingetcreate ---"
-          & .\wingetcreate.exe update psmux.psnet `
+          & .\wingetcreate.exe update marlocarlo.psnet `
             --version $version `
             --urls $exeUrl `
             --token $env:WINGET_TOKEN `
@@ -372,17 +375,17 @@ jobs:
           # Version manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
-          PackageIdentifier: psmux.psnet
+          PackageIdentifier: marlocarlo.psnet
           PackageVersion: $version
           DefaultLocale: en-US
           ManifestType: version
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.yaml" -Encoding utf8NoBOM
 
           # Installer manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
-          PackageIdentifier: psmux.psnet
+          PackageIdentifier: marlocarlo.psnet
           PackageVersion: $version
           Platform:
           - Windows.Desktop
@@ -396,12 +399,12 @@ jobs:
             - psnet
           ManifestType: installer
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.installer.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.installer.yaml" -Encoding utf8NoBOM
 
           # Default locale manifest
           @"
           # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
-          PackageIdentifier: psmux.psnet
+          PackageIdentifier: marlocarlo.psnet
           PackageVersion: $version
           PackageLocale: en-US
           Publisher: psmux
@@ -421,7 +424,7 @@ jobs:
           - windows
           ManifestType: defaultLocale
           ManifestVersion: 1.9.0
-          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/psmux.psnet.locale.en-US.yaml" -Encoding utf8NoBOM
+          "@ -replace '(?m)^          ', '' | Set-Content "$manifestDir/marlocarlo.psnet.locale.en-US.yaml" -Encoding utf8NoBOM
 
           Write-Host "--- Submitting manifests via wingetcreate submit ---"
           & .\wingetcreate.exe submit $manifestDir --token $env:WINGET_TOKEN
