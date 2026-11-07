@@ -25,6 +25,13 @@ const SIO_RCVALL: u32 = 0x98000001;
 const RCVALL_ON: u32 = 1;
 const INVALID_SOCKET: usize = !0;
 const SOCKET_ERROR: i32 = -1;
+const SOL_SOCKET: i32 = 0xffff;
+const SO_RCVTIMEO: i32 = 0x1006;
+const WSAETIMEDOUT: i32 = 10060;
+/// How long one recv may block before the loop rechecks `active`.
+const RECV_TIMEOUT_MS: u32 = 250;
+/// Upper bound on how long stop() waits for the capture thread.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[repr(C)]
 #[allow(non_snake_case, non_camel_case_types)]
@@ -64,6 +71,8 @@ extern "system" {
         lpCompletionRoutine: *mut u8,
     ) -> i32;
     fn recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32;
+    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+    fn WSAGetLastError() -> i32;
     fn closesocket(s: usize) -> i32;
     fn WSACleanup() -> i32;
     fn gethostname(name: *mut u8, namelen: i32) -> i32;
@@ -135,11 +144,18 @@ impl PacketSniffer {
         }));
     }
 
-    /// Stop the sniffer.
+    /// Stop the sniffer. Waits briefly for the capture thread, then lets it go:
+    /// quitting must never hang on a socket call (issue #12).
     pub fn stop(&mut self) {
         self.active.store(false, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
-            let _ = h.join();
+            let deadline = std::time::Instant::now() + STOP_WAIT;
+            while !h.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
     }
 
@@ -275,18 +291,11 @@ fn sniffer_thread(
         }
 
         // ── Capture loop ──
-        let mut buf = vec![0u8; 65535];
-
-        while active.load(Ordering::Relaxed) {
-            // Use a timeout approach: set socket recv timeout so we can check `active`
-            // For simplicity, just recv (blocking) with large buffer.
-            // The thread will be stopped when active=false and Drop closes the socket.
-            let len = recv(sock, buf.as_mut_ptr(), buf.len() as i32, 0);
-            if len <= 0 || !active.load(Ordering::Relaxed) {
-                break;
-            }
-            let pkt = &buf[..len as usize];
-
+        // A bounded recv timeout lets the loop notice `active == false`. A plain
+        // blocking recv on a quiet uplink never returns, and then quitting hung
+        // forever in PacketSniffer::drop joining this thread (issue #12).
+        set_recv_timeout(sock, RECV_TIMEOUT_MS);
+        capture_loop(sock, &active, |pkt| {
             if let Some(snippet) = parse_packet(pkt, local_ip) {
                 if let Ok(mut lock) = snippets.lock() {
                     lock.push_back(snippet);
@@ -296,13 +305,42 @@ fn sniffer_thread(
                     }
                 }
             }
-        }
+        });
 
         closesocket(sock);
         WSACleanup();
     }
 
     active.store(false, Ordering::Relaxed);
+}
+
+/// Make recv on `sock` give up after `ms` milliseconds (Winsock SO_RCVTIMEO).
+fn set_recv_timeout(sock: usize, ms: u32) -> bool {
+    unsafe {
+        setsockopt(
+            sock,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &ms as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as i32,
+        ) == 0
+    }
+}
+
+/// Receive datagrams until `active` goes false or the socket fails.
+/// A recv timeout is not an error: it is the chance to recheck `active`.
+fn capture_loop(sock: usize, active: &AtomicBool, mut on_packet: impl FnMut(&[u8])) {
+    let mut buf = vec![0u8; 65535];
+    while active.load(Ordering::Relaxed) {
+        let len = unsafe { recv(sock, buf.as_mut_ptr(), buf.len() as i32, 0) };
+        if len == SOCKET_ERROR && unsafe { WSAGetLastError() } == WSAETIMEDOUT {
+            continue;
+        }
+        if len <= 0 || !active.load(Ordering::Relaxed) {
+            break;
+        }
+        on_packet(&buf[..len as usize]);
+    }
 }
 
 // ─── Packet parsing ──────────────────────────────────────────────────────────
@@ -575,4 +613,83 @@ unsafe fn get_local_ipv4() -> Option<u32> {
 
     freeaddrinfo(result);
     ip
+}
+
+#[cfg(test)]
+mod tests {
+    //! Issue #12: quitting psnet from an elevated shell sometimes hung forever.
+    //! The capture thread sat in a blocking recv on the raw socket, and
+    //! PacketSniffer::drop joined it. On a quiet link no packet ever arrived.
+    use super::*;
+    use std::net::UdpSocket;
+    use std::os::windows::io::AsRawSocket;
+    use std::time::{Duration, Instant};
+
+    fn quiet_socket() -> UdpSocket {
+        // Bound to loopback on a random port: nothing will ever send to it.
+        UdpSocket::bind("127.0.0.1:0").expect("bind loopback udp")
+    }
+
+    fn wait_finished<T>(h: &thread::JoinHandle<T>, limit: Duration) -> bool {
+        let end = Instant::now() + limit;
+        while !h.is_finished() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(10));
+        }
+        h.is_finished()
+    }
+
+    /// Reproduces the bug: with no recv timeout (the old code) the loop never
+    /// sees `active = false` on a quiet socket, so a join would hang.
+    #[test]
+    fn blocking_recv_ignores_stop_on_a_quiet_socket() {
+        let s = quiet_socket();
+        let raw = s.as_raw_socket() as usize;
+        let active = Arc::new(AtomicBool::new(true));
+        let a = Arc::clone(&active);
+        let h = thread::spawn(move || capture_loop(raw, &a, |_| {}));
+        thread::sleep(Duration::from_millis(100));
+        active.store(false, Ordering::Relaxed);
+        assert!(
+            !wait_finished(&h, Duration::from_millis(1500)),
+            "a blocking recv returned on its own; the issue #12 repro is invalid"
+        );
+        // Release the stuck thread so the test process can finish.
+        let addr = s.local_addr().unwrap();
+        UdpSocket::bind("127.0.0.1:0").unwrap().send_to(b"x", addr).unwrap();
+        assert!(wait_finished(&h, Duration::from_secs(2)));
+    }
+
+    /// The fix: with SO_RCVTIMEO set the loop exits promptly after stop.
+    #[test]
+    fn timed_recv_stops_promptly_on_a_quiet_socket() {
+        let s = quiet_socket();
+        let raw = s.as_raw_socket() as usize;
+        assert!(set_recv_timeout(raw, RECV_TIMEOUT_MS));
+        let active = Arc::new(AtomicBool::new(true));
+        let a = Arc::clone(&active);
+        let h = thread::spawn(move || capture_loop(raw, &a, |_| {}));
+        thread::sleep(Duration::from_millis(600)); // spans at least two timeouts
+        assert!(!h.is_finished(), "a recv timeout must not end the capture loop");
+        active.store(false, Ordering::Relaxed);
+        assert!(
+            wait_finished(&h, Duration::from_millis(1000)),
+            "capture loop did not stop within 1s of active=false"
+        );
+    }
+
+    /// The real sniffer must stop within its bounded wait, live or not.
+    #[test]
+    fn packet_sniffer_stop_is_bounded() {
+        let mut sn = PacketSniffer::new(100);
+        sn.start();
+        thread::sleep(Duration::from_millis(800));
+        // Elevated runs get a live raw socket. Its recv timeouts must not
+        // have ended capture on their own.
+        if sn.get_error().is_none() {
+            assert!(sn.active.load(Ordering::Relaxed), "live sniffer died on a recv timeout");
+        }
+        let t = Instant::now();
+        sn.stop();
+        assert!(t.elapsed() < Duration::from_secs(2), "stop took {:?}", t.elapsed());
+    }
 }
