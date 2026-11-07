@@ -1401,6 +1401,22 @@ impl App {
                 self.alert_engine.unread_count = 0;
                 self.alert_pane_scrolls = [0; 6];
             }
+            // Trust / untrust the address of the selected alert (#11)
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                let ip = self.selected_alert().and_then(|a| a.kind.subject_ip());
+                let msg = match ip {
+                    Some(ip) => {
+                        if self.alert_engine.toggle_trusted(ip) {
+                            self.alert_pane_scrolls = [0; 6];
+                            format!("Trusted {}: no more alerts about it (w on its alert again to undo)", ip)
+                        } else {
+                            format!("{} is no longer trusted", ip)
+                        }
+                    }
+                    None => "This alert has no address to trust".to_string(),
+                };
+                self.status_message = Some((msg, Instant::now()));
+            }
             KeyCode::Char('z') | KeyCode::Char('Z') => {
                 if self.alert_engine.is_snoozed() {
                     self.alert_engine.unsnooze();
@@ -1463,6 +1479,20 @@ impl App {
         if !found {
             if up { self.scroll_up(n); } else { self.scroll_down(n); }
         }
+    }
+
+    /// The highlighted alert in the focused pane, newest first like the UI.
+    fn selected_alert(&self) -> Option<&crate::types::Alert> {
+        let (cat, count) = self.focused_alert_cat()?;
+        if count == 0 {
+            return None;
+        }
+        let selected = self.alert_pane_scrolls[Self::alert_cat_ordinal(cat)].min(count - 1);
+        let mut cat_alerts: Vec<&crate::types::Alert> = self.alert_engine.alerts.iter()
+            .filter(|a| a.kind.category() == cat)
+            .collect();
+        cat_alerts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        cat_alerts.get(selected).copied()
     }
 
     /// Get the focused alert category and its alert count.
@@ -2159,6 +2189,46 @@ mod filter_mode_tests {
         let mut app = test_app();
         app.incognito = true; // skip disk writes in the quit path
         assert!(app.handle_key(KeyCode::Char('q')), "'q' must quit outside filter editing");
+    }
+
+    /// Issue #11: `w` on an alert trusts its address, removes the alerts
+    /// already raised about it, and stops new ones. `w` again undoes it.
+    #[test]
+    fn w_trusts_the_selected_alert_address() {
+        use crate::types::{ThreatInfo, Connection};
+        let mut app = test_app();
+        app.alert_engine.trusted = crate::network::trusted::TrustedIps::in_memory();
+        app.alert_engine.alerts.clear();
+        app.bottom_tab = BottomTab::Alerts;
+
+        let peer: std::net::IpAddr = "185.24.10.10".parse().unwrap();
+        let conn = Connection {
+            proto: crate::types::ConnProto::Tcp,
+            local_addr: "192.168.1.5".parse().unwrap(),
+            local_port: 50000,
+            remote_addr: Some(peer),
+            remote_port: Some(22),
+            state: Some(crate::types::TcpState::Established),
+            pid: 1234,
+            process_name: "ssh.exe".into(),
+            dns_hostname: None,
+            module_name: None,
+        };
+        let threat = ThreatInfo { ip: peer, reason: "test".into() };
+        app.alert_engine.check_suspicious(std::slice::from_ref(&conn), std::slice::from_ref(&threat));
+        assert_eq!(app.alert_engine.alerts.len(), 1, "a suspicious host alert was raised");
+
+        app.handle_key(KeyCode::Char('w'));
+        assert!(app.alert_engine.trusted.contains(peer));
+        assert!(app.alert_engine.alerts.is_empty(), "trusting clears its alerts");
+
+        app.alert_engine.check_suspicious(std::slice::from_ref(&conn), std::slice::from_ref(&threat));
+        assert!(app.alert_engine.alerts.is_empty(), "no new alert for a trusted address");
+
+        // Untrust: there is no alert left to press w on, so use the engine.
+        assert!(!app.alert_engine.toggle_trusted(peer));
+        app.alert_engine.check_suspicious(std::slice::from_ref(&conn), std::slice::from_ref(&threat));
+        assert_eq!(app.alert_engine.alerts.len(), 1, "alerts come back once untrusted");
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub fn draw_key_hints(f: &mut Frame, area: Rect, app: &App) {
             key_span("Enter", "Detail"),
             key_span("r", "Mark Read"),
             key_span("c", "Clear All"),
+            key_span("w", "Trust IP"),
             key_span("z", &format!("{}", if app.alert_engine.is_snoozed() { "Unsnooze" } else { "Snooze 5m" })),
         ],
         BottomTab::Firewall => vec![

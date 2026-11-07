@@ -537,6 +537,19 @@ impl AlertKind {
     }
 
     /// Alert category for grouped display in the UI.
+    /// The remote or LAN address an alert is about, if it has one. Alerts
+    /// about a trusted address are suppressed (issue #11).
+    pub fn subject_ip(&self) -> Option<IpAddr> {
+        match self {
+            Self::SuspiciousHost { ip, .. } => Some(*ip),
+            Self::RdpConnection { remote_addr, .. } => Some(*remote_addr),
+            Self::NewDevice { ip, .. } => Some(*ip),
+            Self::DeviceLeft { ip, .. } => Some(*ip),
+            Self::ArpAnomaly { ip, .. } => Some(*ip),
+            _ => None,
+        }
+    }
+
     pub fn category(&self) -> AlertCategory {
         match self {
             // Security & Threats

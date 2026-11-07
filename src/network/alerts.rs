@@ -200,6 +200,8 @@ pub struct AlertEngine {
     alerts_path: PathBuf,
     /// Path for known-state persistence
     known_state_path: PathBuf,
+    /// Addresses the user trusts: alerts about them are not raised (#11).
+    pub trusted: crate::network::trusted::TrustedIps,
     /// Deferred load result from background thread
     deferred_state: Option<Arc<Mutex<Option<(HashSet<String>, HashMap<IpAddr, String>, Vec<IpAddr>, Option<LastVisitSummary>)>>>>,
 }
@@ -233,6 +235,9 @@ impl AlertEngine {
             anomaly_detector: AnomalyDetector::new(),
             idle_tracker: IdleTracker::new(),
             last_visit_summary: None,
+            trusted: crate::network::trusted::TrustedIps::load(
+                known_state_path.with_file_name("trusted_ips.txt"),
+            ),
             alerts_path,
             known_state_path,
             deferred_state: Some(deferred),
@@ -519,6 +524,13 @@ impl AlertEngine {
     }
 
     fn push_alert(&mut self, kind: AlertKind) {
+        // The user trusts this address: say nothing about it.
+        if let Some(ip) = kind.subject_ip() {
+            if self.trusted.contains(ip) {
+                return;
+            }
+        }
+
         // Check snooze
         if let Some(until) = self.snoozed_until {
             if Instant::now() < until {
@@ -549,6 +561,18 @@ impl AlertEngine {
         if self.alerts.len() > self.max_alerts {
             self.alerts.drain(0..self.alerts.len() - self.max_alerts);
         }
+    }
+
+    /// Trust or stop trusting `ip`. Trusting also removes the alerts already
+    /// raised about it. Returns true when the address is trusted afterwards.
+    pub fn toggle_trusted(&mut self, ip: IpAddr) -> bool {
+        let trusted = self.trusted.toggle(ip);
+        if trusted {
+            let list = &self.trusted;
+            self.alerts.retain(|a| a.kind.subject_ip().map_or(true, |s| !list.contains(s)));
+            self.unread_count = self.alerts.iter().filter(|a| !a.read).count();
+        }
+        trusted
     }
 
     /// Mark all alerts as read.

@@ -89,6 +89,7 @@ Think **GlassWire + Wireshark + htop**, but for your terminal.
 - **Categorized security alerts** — suspicious hosts, unusual ports, threat intelligence matches
 - **Split-pane layout** with independent scrolling per category
 - **Detail popup** with full alert context and recommended actions
+- **Trusted addresses**: press `w` on an alert to stop alerts about its IP (press it again to undo). The list is saved in `%APPDATA%\psnet\trusted_ips.txt`, one address or CIDR range per line (for example `100.64.0.0/10` for a Tailscale network), and you can edit it by hand
 
 ### 🛡️ Firewall
 - **App-centric firewall management** — see which apps are making connections

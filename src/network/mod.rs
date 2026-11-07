@@ -9,6 +9,7 @@ pub mod bandwidth;
 pub mod firewall;
 pub mod scanner;
 pub mod threats;
+pub mod trusted;
 pub mod system_monitor;
 pub mod usage;
 pub mod geoip;

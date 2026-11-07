@@ -100,10 +100,11 @@ fn classify_ipv4(ip: Ipv4Addr) -> Option<ThreatInfo> {
 /// Check if the IP is a bogon (reserved/unroutable) that shouldn't be a remote WAN address.
 fn is_bogon_remote(octets: [u8; 4]) -> bool {
     match octets[0] {
+        // Not flagged on purpose (issue #11): 100.64.0.0/10 is carrier-grade
+        // NAT and the range Tailscale and other mesh VPNs hand out, and
+        // 169.254.0.0/16 is link-local. Both are normal peers, not threats.
         0 => true,           // 0.0.0.0/8 — "This" network
-        100 if octets[1] >= 64 && octets[1] <= 127 => true, // 100.64.0.0/10 — Carrier-grade NAT
         127 => true,         // 127.0.0.0/8 — Loopback
-        169 if octets[1] == 254 => true, // 169.254.0.0/16 — Link-local
         192 if octets[1] == 0 && octets[2] == 0 => true, // 192.0.0.0/24 — IETF Protocol
         192 if octets[1] == 0 && octets[2] == 2 => true, // 192.0.2.0/24 — TEST-NET-1
         198 if octets[1] == 51 && octets[2] == 100 => true, // 198.51.100.0/24 — TEST-NET-2
@@ -116,14 +117,17 @@ fn is_bogon_remote(octets: [u8; 4]) -> bool {
 
 /// Known scanner networks (research scanners, known attack sources).
 fn is_known_scanner(octets: [u8; 4]) -> bool {
-    // Shodan, Censys, and other known mass-scanner ranges
-    let prefix16 = (octets[0] as u16) << 8 | octets[1] as u16;
-    matches!(prefix16,
-        // Censys scanner ranges
-        0x8E_A3 |  // 142.163.0.0/16
-        // Common attack source ranges (heavily reported)
-        0xB9_18 |  // 185.24.0.0/16
-        0xB9_E8    // 185.232.0.0/16
+    // Censys' published scanner /24s. The old list had 142.163.0.0/16 (a
+    // byte swapped 162.142, really a Canadian ISP) and two whole /16s of
+    // European hosting, so ordinary SSH sessions to VPSes there were raised
+    // as critical (issue #11).
+    let prefix24 = [octets[0], octets[1], octets[2]];
+    matches!(prefix24,
+        [162, 142, 125] |
+        [167, 94, 138] | [167, 94, 145] | [167, 94, 146] |
+        [167, 248, 133] |
+        [199, 45, 154] | [199, 45, 155] |
+        [206, 168, 34]
     )
 }
 
@@ -138,3 +142,32 @@ fn is_known_malware_range(octets: [u8; 4]) -> bool {
     false
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flagged(s: &str) -> bool {
+        classify_ip(s.parse().unwrap()).is_some()
+    }
+
+    /// Issue #11: SSH sessions showed as critical alerts. These are all
+    /// ordinary peers that the old ranges flagged.
+    #[test]
+    fn ordinary_peers_are_not_threats() {
+        assert!(!flagged("100.101.12.34"), "Tailscale / CGNAT peer");
+        assert!(!flagged("169.254.10.20"), "link-local peer");
+        assert!(!flagged("142.163.50.60"), "Canadian ISP, not Censys");
+        assert!(!flagged("185.24.10.10"), "European hosting /16");
+        assert!(!flagged("185.232.20.20"), "European hosting /16");
+        assert!(!flagged("192.168.1.10"));
+    }
+
+    #[test]
+    fn real_scanners_and_bogons_still_flag() {
+        assert!(flagged("162.142.125.7"));
+        assert!(flagged("167.94.138.120"));
+        assert!(flagged("0.1.2.3"));
+        assert!(flagged("198.18.0.5"));
+        assert!(flagged("250.0.0.1"));
+    }
+}
