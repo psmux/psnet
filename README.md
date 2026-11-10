@@ -142,7 +142,7 @@ psnet
 ### Via WinGet
 
 ```powershell
-winget install psmux.psnet
+winget install marlocarlo.psnet
 psnet
 ```
 
